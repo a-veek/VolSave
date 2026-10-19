@@ -1,0 +1,15 @@
+[package]
+name = "rsnap-win"
+description = "Windows volume, disk and VSS access for rsnap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rsnap-core.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+windows-link.workspace = true
