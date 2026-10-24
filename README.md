@@ -1,4 +1,4 @@
-# rsnap
+# VolSave
 
 Disk and volume imaging for Windows, written in Rust. Backups use the
 Volume Shadow Copy Service (VSS); images are compressed with zstd.
@@ -9,10 +9,10 @@ Status: early development. Command line backup (full and differential), restore 
 
 | Crate | Purpose |
 | --- | --- |
-| `crates/rsnap-format` | Image format: header, blocks, index, split files, diff hash lists ([spec](docs/FORMAT.md)) |
-| `crates/rsnap-core` | Platform-independent engine: used-range planning, parallel backup pipeline, restore |
-| `crates/rsnap-win` | Windows: volumes, disks, VSS snapshots, allocation bitmaps, raw device I/O |
-| `crates/rsnap-cli` | Command line tool `rsnap` |
+| `crates/volsave-format` | Image format: header, blocks, index, split files, diff hash lists ([spec](docs/FORMAT.md)) |
+| `crates/volsave-core` | Platform-independent engine: used-range planning, parallel backup pipeline, restore |
+| `crates/volsave-win` | Windows: volumes, disks, VSS snapshots, allocation bitmaps, raw device I/O |
+| `crates/volsave-cli` | Command line tool `volsave` |
 
 Planned: disk images, storage targets (SMB, FTP,
 SFTP), Slint GUI.
@@ -27,13 +27,13 @@ cargo build --release --target x86_64-pc-windows-gnu   # Windows EXE from Linux 
 ## Usage (Windows, as administrator)
 
 ```
-rsnap list
-rsnap exclusions C:                                # what FilesNotToBackup leaves out
-rsnap backup C: E:\backup\c.dimg                   # also writes E:\backup\c.dhsh
-rsnap backup C: E:\backup\c-mon.dimg --diff E:\backup\c.dhsh
-rsnap verify E:\backup\c.dimg
-rsnap restore E:\backup\c-mon.dimg F:              # finds c.dimg by its id
-rsnap merge E:\backup\c-mon.dimg E:\backup\c-new.dimg
+volsave list
+volsave exclusions C:                              # what FilesNotToBackup leaves out
+volsave backup C: E:\backup\c.dimg                 # also writes E:\backup\c.dhsh
+volsave backup C: E:\backup\c-mon.dimg --diff E:\backup\c.dhsh
+volsave verify E:\backup\c.dimg
+volsave restore E:\backup\c-mon.dimg F:            # finds c.dimg by its id
+volsave merge E:\backup\c-mon.dimg E:\backup\c-new.dimg
 ```
 
 Commands that work on an image append a log next to it (`c.dimg` -> `c.log`);

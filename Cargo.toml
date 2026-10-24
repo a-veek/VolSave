@@ -9,9 +9,9 @@ rust-version = "1.85"
 publish = false
 
 [workspace.dependencies]
-rsnap-core = { path = "crates/rsnap-core" }
-rsnap-format = { path = "crates/rsnap-format" }
-rsnap-win = { path = "crates/rsnap-win" }
+volsave-core = { path = "crates/volsave-core" }
+volsave-format = { path = "crates/volsave-format" }
+volsave-win = { path = "crates/volsave-win" }
 
 anyhow = "1"
 blake3 = "1"

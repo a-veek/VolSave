@@ -491,55 +491,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "rsnap-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "ctrlc",
- "rsnap-core",
- "rsnap-format",
- "rsnap-win",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "rsnap-core"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "rsnap-format",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "rsnap-format"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "crc32fast",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "uuid",
- "zstd",
-]
-
-[[package]]
-name = "rsnap-win"
-version = "0.1.0"
-dependencies = [
- "rsnap-core",
- "thiserror",
- "windows",
- "windows-link",
-]
-
-[[package]]
 name = "rustix"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -695,6 +646,55 @@ dependencies = [
  "getrandom",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "volsave-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "ctrlc",
+ "tempfile",
+ "uuid",
+ "volsave-core",
+ "volsave-format",
+ "volsave-win",
+]
+
+[[package]]
+name = "volsave-core"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "tempfile",
+ "thiserror",
+ "volsave-format",
+]
+
+[[package]]
+name = "volsave-format"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crc32fast",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
+name = "volsave-win"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "volsave-core",
+ "windows",
+ "windows-link",
 ]
 
 [[package]]

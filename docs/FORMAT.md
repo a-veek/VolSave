@@ -1,4 +1,4 @@
-# rsnap image format, version 1
+# VolSave image format, version 1
 
 An image is one logical byte stream. It may be split into several files
 (`name.dimg`, `name.dimg.002`, `name.dimg.003`, …) that are concatenated
@@ -16,7 +16,7 @@ differential image, unchanged since the base image).
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 8 | magic `RSNAPIMG` |
+| 0 | 8 | magic `VSAVEIMG` |
 | 8 | 4 | format version (1) |
 | 12 | 4 | header length in bytes (= 96 + metadata length) |
 | 16 | 16 | image id (UUID) |
@@ -33,7 +33,7 @@ for missing ones:
 
 ```json
 {
-  "tool": "rsnap 0.1.0",
+  "tool": "VolSave 0.1.0",
   "created_unix": 1760000000,
   "comment": null,
   "source": {
@@ -81,7 +81,7 @@ when compression does not make it smaller.
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 8 | magic `RSNAPEND` |
+| 0 | 8 | magic `VSAVEEND` |
 | 8 | 8 | stream position of the index |
 | 16 | 8 | index length in bytes |
 | 24 | 4 | CRC-32 of footer bytes 0 … 24 |
@@ -101,7 +101,7 @@ base image id; `base_image_name` in its metadata names the full image file.
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 8 | magic `RSNAPHSH` |
+| 0 | 8 | magic `VSAVEHSH` |
 | 8 | 4 | format version (1) |
 | 12 | 4 | chunk size (power of two) |
 | 16 | 16 | id of the image the list belongs to |
