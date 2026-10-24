@@ -178,3 +178,19 @@ pub fn format_guid(guid: &GUID) -> String {
         guid.data1, guid.data2, guid.data3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]
     )
 }
+
+static DEBUG_HOOK: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Routes internal details (e.g. every VSS call) to the caller's log.
+pub fn set_debug_hook(hook: fn(&str)) {
+    let _ = DEBUG_HOOK.set(hook);
+}
+
+/// Passes a detail to the hook; without one it is printed if `RSNAP_DEBUG` is set.
+pub(crate) fn debug(message: &str) {
+    match DEBUG_HOOK.get() {
+        Some(hook) => hook(message),
+        None if std::env::var_os("RSNAP_DEBUG").is_some() => eprintln!("[debug] {message}"),
+        None => {}
+    }
+}

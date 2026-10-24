@@ -19,8 +19,8 @@ pub(crate) fn open_image(path: &Path) -> Result<Reader> {
     let reader = ImageReader::open(source)
         .with_context(|| format!("{} is not a valid image", path.display()))?;
     if reader.index_rebuilt() {
-        eprintln!(
-            "warning: the index of {} was missing and has been rebuilt; the image may be incomplete",
+        warn!(
+            "the index of {} was missing and has been rebuilt; the image may be incomplete",
             path.display()
         );
     }

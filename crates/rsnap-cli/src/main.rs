@@ -9,11 +9,14 @@ use clap::{Parser, Subcommand};
 use rsnap_core::{BackupOptions, FileTarget, Progress, merge as run_merge, restore};
 use rsnap_format::{DEFAULT_ZSTD_LEVEL, FileHeader, ImageMetadata, ImageWriter, SplitWriter};
 
+#[macro_use]
+mod log;
 mod images;
 #[cfg(windows)]
 mod windows_cmds;
 
 use images::{hash_path, open_image, open_view, write_hash_list};
+use log::LogLevel;
 
 /// Set by Ctrl+C; long operations stop at the next block.
 static CANCEL: AtomicBool = AtomicBool::new(false);
@@ -23,6 +26,16 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Log file. Without it, commands working on an image log next to it
+    /// (c.dimg -> c.log); runs are appended
+    #[arg(long, global = true, value_name = "FILE", num_args = 0..=1, conflicts_with = "no_log")]
+    log: Option<Option<PathBuf>>,
+    /// Do not write a log file
+    #[arg(long, global = true)]
+    no_log: bool,
+    /// How much detail to log
+    #[arg(long, global = true, value_enum, default_value_t = LogLevel::Info)]
+    log_level: LogLevel,
 }
 
 #[derive(Subcommand)]
@@ -55,6 +68,9 @@ enum Command {
         /// Also save pagefile.sys, swapfile.sys and hiberfil.sys
         #[arg(long)]
         keep_system_files: bool,
+        /// Which entries of the Windows list FilesNotToBackup to leave out
+        #[arg(long, value_enum, default_value_t = ExclusionChoice::Safe)]
+        files_not_to_backup: ExclusionChoice,
         /// Comment stored in the image
         #[arg(long)]
         comment: Option<String>,
@@ -82,6 +98,11 @@ enum Command {
         #[command(flatten)]
         common: WriteOptions,
     },
+    /// Show which files a backup of the volume leaves out (Windows FilesNotToBackup list)
+    Exclusions {
+        /// Volume: C:, a folder mount point or \\?\Volume{GUID}\
+        volume: String,
+    },
     /// Show what an image contains
     Info { image: PathBuf },
     /// Read every block and check its checksum
@@ -93,6 +114,18 @@ enum Command {
         #[arg(long)]
         base: Option<PathBuf>,
     },
+}
+
+/// Which `FilesNotToBackup` entries to apply.
+#[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExclusionChoice {
+    /// Only entries whose files are harmless as zeros after a restore
+    /// (temp files, dumps, error reports, page file, shadow copy storage)
+    Safe,
+    /// Every entry, including databases such as the Windows Update store
+    All,
+    /// None; save every file
+    None,
 }
 
 /// Options for commands that write an image.
@@ -130,13 +163,40 @@ impl WriteOptions {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let _ = ctrlc::set_handler(|| CANCEL.store(true, Ordering::Relaxed));
-    match run(cli.command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("\nerror: {error:#}");
-            ExitCode::FAILURE
-        }
+    let debug = cli.log_level == LogLevel::Debug || std::env::var_os("RSNAP_DEBUG").is_some();
+    log::set_level(if debug {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
+    });
+    #[cfg(windows)]
+    rsnap_win::set_debug_hook(log::debug);
+
+    let log_file = match (&cli.log, cli.no_log) {
+        (_, true) => None,
+        (Some(Some(path)), _) => Some(path.clone()),
+        _ => default_log_path(&cli.command),
+    };
+    if let Some(path) = &log_file
+        && let Err(error) = log::open(path)
+    {
+        eprintln!("warning: cannot write the log {}: {error}", path.display());
     }
+    let result = run(cli.command);
+    log::finish(&result)
+}
+
+/// Commands working on an image log next to it: `c.dimg` -> `c.log`.
+fn default_log_path(command: &Command) -> Option<PathBuf> {
+    let image = match command {
+        Command::Backup { image, .. }
+        | Command::Restore { image, .. }
+        | Command::Verify { image }
+        | Command::Extract { image, .. } => image,
+        Command::Merge { output, .. } => output,
+        Command::List | Command::Exclusions { .. } | Command::Info { .. } => return None,
+    };
+    Some(image.with_extension("log"))
 }
 
 fn run(command: Command) -> Result<()> {
@@ -157,6 +217,8 @@ fn run(command: Command) -> Result<()> {
         #[cfg(windows)]
         Command::List => windows_cmds::list(),
         #[cfg(windows)]
+        Command::Exclusions { volume } => windows_cmds::exclusions(&volume),
+        #[cfg(windows)]
         Command::Backup {
             source,
             image,
@@ -167,6 +229,7 @@ fn run(command: Command) -> Result<()> {
             common,
             no_vss,
             keep_system_files,
+            files_not_to_backup,
             comment,
         } => windows_cmds::backup(windows_cmds::BackupArgs {
             source,
@@ -178,6 +241,7 @@ fn run(command: Command) -> Result<()> {
             common,
             no_vss,
             keep_system_files,
+            files_not_to_backup,
             comment,
         }),
         #[cfg(windows)]
@@ -188,7 +252,10 @@ fn run(command: Command) -> Result<()> {
             yes,
         } => windows_cmds::restore(&image, &target, base.as_deref(), yes),
         #[cfg(not(windows))]
-        Command::List | Command::Backup { .. } | Command::Restore { .. } => {
+        Command::List
+        | Command::Exclusions { .. }
+        | Command::Backup { .. }
+        | Command::Restore { .. } => {
             anyhow::bail!("this command is only available on Windows")
         }
     }
@@ -240,19 +307,17 @@ fn info(path: &Path) -> Result<()> {
 
 /// Checks the image and, for a differential image, also its full image.
 fn verify(path: &Path) -> Result<()> {
-    let mut paths = vec![path.to_path_buf()];
-    let header = open_image(path)?.header().clone();
+    let reader = open_image(path)?;
+    let header = reader.header().clone();
+    verify_one(path, reader)?;
     if let Some(base_id) = header.base_image_id {
-        paths.push(images::find_base(path, &header, base_id)?);
-    }
-    for path in paths {
-        verify_one(&path)?;
+        let base = images::find_base(path, &header, base_id)?;
+        verify_one(&base, open_image(&base)?)?;
     }
     Ok(())
 }
 
-fn verify_one(path: &Path) -> Result<()> {
-    let mut reader = open_image(path)?;
+fn verify_one(path: &Path, mut reader: images::Reader) -> Result<()> {
     let total = reader.data_bytes();
     let blocks = reader.blocks().to_vec();
     let mut printer = ProgressPrinter::new("Verifying");
@@ -268,6 +333,10 @@ fn verify_one(path: &Path) -> Result<()> {
     printer.finish();
     for (block, error) in &report.errors {
         eprintln!("bad block at offset {}: {error}", block.offset);
+        log::write_line(
+            "ERROR",
+            &format!("bad block at offset {}: {error}", block.offset),
+        );
     }
     anyhow::ensure!(
         report.is_ok(),
@@ -276,7 +345,7 @@ fn verify_one(path: &Path) -> Result<()> {
         report.errors.len(),
         blocks.len()
     );
-    println!(
+    say!(
         "{}: OK, {} blocks, {} checked",
         path.display(),
         report.blocks_ok,
@@ -296,7 +365,7 @@ fn extract(path: &Path, output: &Path, base: Option<&Path>) -> Result<()> {
         printer.update(p)
     })?;
     printer.finish();
-    println!(
+    say!(
         "Wrote {} to {}",
         human(stats.bytes_written),
         output.display()
@@ -327,7 +396,7 @@ fn merge(path: &Path, output: &Path, base: Option<&Path>, common: &WriteOptions)
     result.sink.finish()?;
     let hashes = hash_path(output);
     write_hash_list(&hashes, &result.hashes)?;
-    println!(
+    say!(
         "Done: {} written to {}, hash list {}",
         human(result.stats.bytes_written),
         output.display(),
@@ -353,6 +422,8 @@ pub(crate) struct ProgressPrinter {
     last: Option<Instant>,
     /// Most recent state, shown unthrottled by `finish`.
     latest: Option<Progress>,
+    /// Next percentage to record in the log.
+    next_logged: u32,
 }
 
 impl ProgressPrinter {
@@ -362,11 +433,26 @@ impl ProgressPrinter {
             started: Instant::now(),
             last: None,
             latest: None,
+            next_logged: 10,
         }
     }
 
     pub(crate) fn update(&mut self, progress: &Progress) {
         self.latest = Some(*progress);
+        let percent = percent(progress);
+        while self.next_logged <= 100 && percent >= f64::from(self.next_logged) {
+            log::write_line(
+                "INFO",
+                &format!(
+                    "{} {}%: {} of {}",
+                    self.label,
+                    self.next_logged,
+                    human(progress.bytes_read),
+                    human(progress.bytes_total)
+                ),
+            );
+            self.next_logged += 10;
+        }
         if self
             .last
             .is_some_and(|last| last.elapsed() < Duration::from_millis(500))
@@ -378,10 +464,7 @@ impl ProgressPrinter {
     }
 
     fn print(&self, progress: &Progress) {
-        let percent = match progress.bytes_total {
-            0 => 100.0,
-            total => progress.bytes_read as f64 * 100.0 / total as f64,
-        };
+        let percent = percent(progress);
         let seconds = self.started.elapsed().as_secs_f64().max(0.001);
         let rate = progress.bytes_read as f64 / seconds;
         eprint!(
@@ -404,6 +487,13 @@ impl ProgressPrinter {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+}
+
+fn percent(progress: &Progress) -> f64 {
+    match progress.bytes_total {
+        0 => 100.0,
+        total => progress.bytes_read as f64 * 100.0 / total as f64,
     }
 }
 

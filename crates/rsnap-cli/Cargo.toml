@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 rsnap-core.workspace = true

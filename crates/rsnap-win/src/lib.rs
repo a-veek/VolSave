@@ -7,6 +7,8 @@
 mod allocation;
 mod device;
 mod disk;
+mod exclusions;
+mod privileges;
 mod util;
 mod volume;
 mod vss;
@@ -14,6 +16,8 @@ mod vss;
 pub use allocation::{Allocation, file_extents, system_file_extents, used_ranges};
 pub use device::RawDevice;
 pub use disk::{DiskInfo, DiskLayout, PartitionInfo, PartitionKind, list_disks};
-pub use util::format_guid;
+pub use exclusions::{ExcludedEntry, ExclusionMode, excluded_files, files_not_to_backup};
+pub use privileges::enable_backup_privileges;
+pub use util::{format_guid, set_debug_hook};
 pub use volume::{DiskExtent, VolumeInfo, list_volumes, resolve_volume};
 pub use vss::{Snapshot, SnapshotSet, VssError};

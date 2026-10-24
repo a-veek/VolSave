@@ -10,12 +10,12 @@ use rsnap_format::{
     part_path,
 };
 use rsnap_win::{
-    DiskLayout, RawDevice, SnapshotSet, VolumeInfo, list_disks, list_volumes, resolve_volume,
-    system_file_extents, used_ranges,
+    DiskLayout, ExclusionMode, RawDevice, SnapshotSet, VolumeInfo, enable_backup_privileges,
+    excluded_files, list_disks, list_volumes, resolve_volume, system_file_extents, used_ranges,
 };
 
 use crate::images::{hash_path, open_view, read_hash_list, write_hash_list};
-use crate::{CANCEL, ProgressPrinter, WriteOptions, human, now_unix, tool_name};
+use crate::{CANCEL, ExclusionChoice, ProgressPrinter, WriteOptions, human, now_unix, tool_name};
 
 pub(crate) struct BackupArgs {
     pub source: String,
@@ -27,6 +27,7 @@ pub(crate) struct BackupArgs {
     pub common: WriteOptions,
     pub no_vss: bool,
     pub keep_system_files: bool,
+    pub files_not_to_backup: ExclusionChoice,
     pub comment: Option<String>,
 }
 
@@ -104,7 +105,7 @@ fn load_base(args: &BackupArgs) -> Result<Option<HashList>> {
         return Ok(None);
     };
     if args.full_if_hash_missing && !path.exists() {
-        eprintln!(
+        note!(
             "note: {} does not exist; making a full backup",
             path.display()
         );
@@ -114,6 +115,7 @@ fn load_base(args: &BackupArgs) -> Result<Option<HashList>> {
 }
 
 pub(crate) fn backup(args: BackupArgs) -> Result<()> {
+    enable_backup_privileges();
     let volume = resolve_volume(&args.source)
         .with_context(|| format!("volume {} not found", args.source))?;
     let base = load_base(&args)?;
@@ -130,17 +132,17 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
 
     let use_vss = !args.no_vss && volume.supports_vss();
     if !args.no_vss && !use_vss {
-        eprintln!(
+        note!(
             "note: {} uses {}, which VSS cannot snapshot; reading the live volume",
             volume.display_name(),
             volume.filesystem
         );
     }
     let snapshot = if use_vss {
-        eprintln!("Creating VSS snapshot of {} ...", volume.display_name());
+        note!("Creating VSS snapshot of {} ...", volume.display_name());
         let set = SnapshotSet::create(&[&volume.guid_path])?;
         for warning in set.warnings() {
-            eprintln!("warning: {warning}");
+            warn!("{warning}");
         }
         Some(set)
     } else {
@@ -164,9 +166,7 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
         match used_ranges(device.file(), size, volume.cluster_size, volume.sector_size) {
             Ok(allocation) => (allocation.used, allocation.clusters_end),
             Err(error) => {
-                eprintln!(
-                    "warning: cannot read the allocation bitmap ({error}); saving every sector"
-                );
+                warn!("cannot read the allocation bitmap ({error}); saving every sector");
                 (RangeSet::full(size), size)
             }
         };
@@ -186,7 +186,7 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
         _ => None,
     };
     if live.is_some() {
-        eprintln!(
+        note!(
             "note: the snapshot hides the last sectors of the volume; reading them from the live volume"
         );
     }
@@ -200,12 +200,26 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
     if !args.keep_system_files {
         let skipped = system_file_extents(&root, volume.cluster_size);
         if !skipped.is_empty() {
-            eprintln!(
+            note!(
                 "Skipping page/swap/hibernation files: {}",
                 human(skipped.total_len())
             );
         }
         used = used.subtract(&skipped);
+    }
+    // File system metadata stays; only the content of the listed files is left out.
+    if args.files_not_to_backup != ExclusionChoice::None && volume.supports_vss() {
+        let (excluded, entries) = excluded_files(&root, &volume, mode(args.files_not_to_backup));
+        let applied = entries.iter().filter(|entry| entry.applied).count();
+        // Report only what comes on top of the page/swap/hibernation files.
+        let before = used.total_len();
+        used = used.subtract(&excluded);
+        if applied > 0 {
+            note!(
+                "Skipping files listed in FilesNotToBackup: {} more ({applied} entries; see `rsnap exclusions`)",
+                human(before - used.total_len())
+            );
+        }
     }
 
     let mut header = FileHeader::new(ImageMetadata {
@@ -226,7 +240,7 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
     }
 
     let writer = ImageWriter::new(args.common.create_sink(&args.image)?, header)?;
-    eprintln!(
+    note!(
         "{} backup of {} ({} of {} in use) to {}",
         if base.is_some() {
             "Differential"
@@ -285,7 +299,7 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
         Some(_) => format!(", {} changed", human(stats.bytes_stored)),
         None => String::new(),
     };
-    println!(
+    say!(
         "Done: {} read{changed}, image {} ({:.0}%) in {} file(s), {}:{:02} min",
         human(stats.bytes_read),
         human(stats.bytes_written),
@@ -295,7 +309,7 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
         seconds % 60
     );
     if let Some(path) = hash_file {
-        println!(
+        say!(
             "Hash list: {} (use with --diff for differential backups)",
             path.display()
         );
@@ -370,7 +384,7 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
     }
 
     let source = opened.header.metadata.source.clone();
-    println!(
+    say!(
         "Image:  {} {} ({}), {}",
         source.filesystem.as_deref().unwrap_or("?"),
         source.label.as_deref().unwrap_or(""),
@@ -378,9 +392,9 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
         source.hostname.as_deref().unwrap_or("unknown computer")
     );
     if let Some(base_path) = &opened.base_path {
-        println!("        differential, full image {}", base_path.display());
+        say!("        differential, full image {}", base_path.display());
     }
-    println!(
+    say!(
         "Target: {} {} \"{}\" ({})",
         volume.display_name(),
         volume.filesystem,
@@ -411,9 +425,9 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
         printer.update(p)
     })?;
     printer.finish();
-    println!("Done: {} written", human(stats.bytes_written));
+    say!("Done: {} written", human(stats.bytes_written));
     if volume.size > source.size_bytes {
-        println!(
+        say!(
             "note: the volume is {} larger than the image; extend the file system in Disk Management to use it",
             human(volume.size - source.size_bytes)
         );
@@ -427,4 +441,60 @@ fn confirm(question: &str) -> Result<bool> {
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
     Ok(answer.trim() == "YES")
+}
+
+fn mode(choice: ExclusionChoice) -> ExclusionMode {
+    match choice {
+        ExclusionChoice::Safe => ExclusionMode::Safe,
+        ExclusionChoice::All => ExclusionMode::All,
+        ExclusionChoice::None => ExclusionMode::None,
+    }
+}
+
+/// Lists which `FilesNotToBackup` entries match files on a volume right now
+/// and whether a default backup leaves them out.
+pub(crate) fn exclusions(target: &str) -> Result<()> {
+    if !enable_backup_privileges() {
+        eprintln!(
+            "note: not running as administrator; protected folders such as System Volume Information are not searched"
+        );
+    }
+    let volume = resolve_volume(target).with_context(|| format!("volume {target} not found"))?;
+    if !volume.supports_vss() {
+        println!(
+            "{} uses {}; FilesNotToBackup is only applied to NTFS and ReFS volumes",
+            volume.display_name(),
+            volume.filesystem
+        );
+        return Ok(());
+    }
+    let (skipped, entries) = excluded_files(&volume.guid_path, &volume, ExclusionMode::Safe);
+    if entries.is_empty() {
+        println!(
+            "Nothing on {} matches FilesNotToBackup",
+            volume.display_name()
+        );
+        return Ok(());
+    }
+    println!(
+        "{:<8} {:>11} {:>7}  {:<26} Entry",
+        "Backup", "Size", "Files", "Name"
+    );
+    for entry in &entries {
+        println!(
+            "{:<8} {:>11} {:>7}  {:<26} {}",
+            if entry.applied { "skipped" } else { "saved" },
+            human(entry.bytes),
+            entry.files,
+            entry.name,
+            entry.entry
+        );
+    }
+    println!(
+        "\nA default backup (--files-not-to-backup safe) skips {}; skipped files come back with \
+         zero content after a restore. Entries marked \"saved\" hold databases or control files \
+         and are only skipped with --files-not-to-backup all.",
+        human(skipped.total_len())
+    );
+    Ok(())
 }

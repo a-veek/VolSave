@@ -7,6 +7,7 @@
 
 mod backup;
 mod buffer;
+mod exclusion;
 mod ranges;
 mod restore;
 mod source;
@@ -14,6 +15,7 @@ mod view;
 
 pub use backup::{BackupError, BackupOptions, BackupOutput, BackupStats, Progress, backup};
 pub use buffer::AlignedBuf;
+pub use exclusion::{PathRule, wildcard_match};
 pub use ranges::{BlockPlan, PlannedBlock, RangeSet};
 pub use restore::{RestoreError, RestoreStats, merge, restore};
 pub use source::{

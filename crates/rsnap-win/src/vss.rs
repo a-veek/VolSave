@@ -430,11 +430,9 @@ fn init_com() {
     }
 }
 
-/// Prints VSS details when the environment variable `RSNAP_DEBUG` is set.
+/// VSS details for the debug log.
 fn debug(message: &str) {
-    if std::env::var_os("RSNAP_DEBUG").is_some() {
-        eprintln!("[vss] {message}");
-    }
+    crate::util::debug(&format!("vss: {message}"));
 }
 
 /// # Safety
