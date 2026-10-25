@@ -11,6 +11,8 @@ use volsave_format::{DEFAULT_ZSTD_LEVEL, FileHeader, ImageMetadata, ImageWriter,
 
 #[macro_use]
 mod log;
+#[cfg(windows)]
+mod disk_cmds;
 mod images;
 #[cfg(windows)]
 mod windows_cmds;
@@ -48,7 +50,9 @@ enum Command {
     List,
     /// Back up a volume into an image
     Backup {
-        /// Volume to back up: C:, a folder mount point or \\?\Volume{GUID}\
+        /// What to back up: a volume (C:, a folder mount point, \\?\Volume{GUID}\)
+        /// or a whole disk with partition table and all partitions (HD0, HD1, ...
+        /// as shown by `volsave list`)
         source: String,
         /// Image file to create
         image: PathBuf,
@@ -78,15 +82,23 @@ enum Command {
         /// Comment stored in the image
         #[arg(long)]
         comment: Option<String>,
+        /// Disks only: copy every sector instead of the used blocks of each
+        /// partition (dynamic disks, Storage Spaces, unknown layouts; no VSS)
+        #[arg(long)]
+        all_sectors: bool,
     },
     /// Restore an image onto a volume (overwrites the volume)
     Restore {
         image: PathBuf,
-        /// Target volume: D:, a folder mount point or \\?\Volume{GUID}\
+        /// Target: a volume (D:, a folder mount point, \\?\Volume{GUID}\) for
+        /// volume images, a whole disk (HD1, ...) for disk images
         target: String,
         /// Full image of a differential image (default: searched in the image's folder)
         #[arg(long)]
         base: Option<PathBuf>,
+        /// Disk images: restore only this partition onto the target volume
+        #[arg(long)]
+        partition: Option<u32>,
         /// Do not ask for confirmation
         #[arg(long)]
         yes: bool,
@@ -111,12 +123,15 @@ enum Command {
     Info { image: PathBuf },
     /// Read every block and check its checksum
     Verify { image: PathBuf },
-    /// Write the image content into a raw file of the original volume size
+    /// Write the image content into a raw file of the original volume or disk size
     Extract {
         image: PathBuf,
         output: PathBuf,
         #[arg(long)]
         base: Option<PathBuf>,
+        /// Disk images: extract only this partition (number as shown by `info`)
+        #[arg(long)]
+        partition: Option<u32>,
     },
 }
 
@@ -211,7 +226,8 @@ fn run(command: Command) -> Result<()> {
             image,
             output,
             base,
-        } => extract(&image, &output, base.as_deref()),
+            partition,
+        } => extract(&image, &output, base.as_deref(), partition),
         Command::Merge {
             image,
             output,
@@ -235,6 +251,7 @@ fn run(command: Command) -> Result<()> {
             keep_system_files,
             files_not_to_backup,
             comment,
+            all_sectors,
         } => windows_cmds::backup(windows_cmds::BackupArgs {
             source,
             image,
@@ -247,14 +264,16 @@ fn run(command: Command) -> Result<()> {
             keep_system_files,
             files_not_to_backup,
             comment,
+            all_sectors,
         }),
         #[cfg(windows)]
         Command::Restore {
             image,
             target,
             base,
+            partition,
             yes,
-        } => windows_cmds::restore(&image, &target, base.as_deref(), yes),
+        } => windows_cmds::restore(&image, &target, base.as_deref(), partition, yes),
         #[cfg(not(windows))]
         Command::List
         | Command::Exclusions { .. }
@@ -291,16 +310,52 @@ fn info(path: &Path) -> Result<()> {
     if let Some(host) = &source.hostname {
         println!("Computer:     {host}");
     }
-    println!(
-        "File system:  {} {}",
-        source.filesystem.as_deref().unwrap_or("-"),
-        source
-            .label
-            .as_deref()
-            .map(|l| format!("\"{l}\""))
-            .unwrap_or_default()
-    );
-    println!("Volume size:  {}", human(source.size_bytes));
+    match &meta.disk {
+        Some(disk) => {
+            println!(
+                "Disk:         {} {}, {} ({} byte sectors){}",
+                disk.style,
+                disk.disk_id,
+                human(source.size_bytes),
+                source.sector_size,
+                disk.model
+                    .as_deref()
+                    .map(|m| format!(", {m}"))
+                    .unwrap_or_default()
+            );
+            println!("Partitions:");
+            for p in &disk.partitions {
+                let name = p
+                    .mount_points
+                    .first()
+                    .cloned()
+                    .or_else(|| p.label.as_ref().map(|l| format!("\"{l}\"")))
+                    .unwrap_or_default();
+                println!(
+                    "  #{:<2} {:>11} at {:>11}  {:<20} {:<6} {:<12} {}",
+                    p.number,
+                    human(p.length),
+                    human(p.offset),
+                    p.kind,
+                    p.filesystem.as_deref().unwrap_or("-"),
+                    name,
+                    p.method
+                );
+            }
+        }
+        None => {
+            println!(
+                "File system:  {} {}",
+                source.filesystem.as_deref().unwrap_or("-"),
+                source
+                    .label
+                    .as_deref()
+                    .map(|l| format!("\"{l}\""))
+                    .unwrap_or_default()
+            );
+            println!("Volume size:  {}", human(source.size_bytes));
+        }
+    }
     println!(
         "Saved data:   {} in {} blocks",
         human(reader.data_bytes()),
@@ -358,16 +413,18 @@ fn verify_one(path: &Path, mut reader: images::Reader) -> Result<()> {
     Ok(())
 }
 
-fn extract(path: &Path, output: &Path, base: Option<&Path>) -> Result<()> {
-    let mut image = open_view(path, base)?;
-    let size = image.view.source_size();
+fn extract(path: &Path, output: &Path, base: Option<&Path>, partition: Option<u32>) -> Result<()> {
+    let image = open_view(path, base)?;
+    let mut view = match partition {
+        Some(number) => image.into_partition(number)?.0,
+        None => image.view,
+    };
+    let size = view.source_size();
     let file =
         File::create(output).with_context(|| format!("cannot create {}", output.display()))?;
     let mut target = FileTarget::new(file, size)?;
     let mut printer = ProgressPrinter::new("Extracting");
-    let stats = restore(image.view.as_mut(), &mut target, &CANCEL, |p| {
-        printer.update(p)
-    })?;
+    let stats = restore(view.as_mut(), &mut target, &CANCEL, |p| printer.update(p))?;
     printer.finish();
     say!(
         "Wrote {} to {}",
@@ -390,6 +447,7 @@ fn merge(path: &Path, output: &Path, base: Option<&Path>, common: &WriteOptions)
         comment: image.header.metadata.comment.clone(),
         source: image.header.metadata.source.clone(),
         base_image_name: None,
+        disk: image.header.metadata.disk.clone(),
     });
     let writer = ImageWriter::new(common.create_sink(output)?, header)?;
     let mut printer = ProgressPrinter::new("Merging");

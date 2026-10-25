@@ -3,17 +3,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use volsave_core::{
-    AlignedBuf, BlockSource, PatchedSource, RangeSet, backup as run_backup, restore as run_restore,
+    AlignedBuf, BlockSource, PatchedSource, RangeSet, backup as run_backup,
+    fix_ntfs_hidden_sectors, restore as run_restore,
 };
 use volsave_format::{
-    FileHeader, HashList, IMAGE_EXTENSION, ImageMetadata, ImageWriter, SourceInfo, SourceKind,
-    part_path,
+    DiskSummary, FileHeader, HashList, IMAGE_EXTENSION, ImageMetadata, ImageWriter, SourceInfo,
+    SourceKind, part_path,
 };
 use volsave_win::{
     DiskLayout, ExclusionMode, RawDevice, SnapshotSet, VolumeInfo, enable_backup_privileges,
     excluded_files, list_disks, list_volumes, resolve_volume, system_file_extents, used_ranges,
 };
 
+use crate::disk_cmds::{backup_disk, parse_disk, restore_disk};
 use crate::images::{hash_path, open_view, read_hash_list, write_hash_list};
 use crate::{CANCEL, ExclusionChoice, ProgressPrinter, WriteOptions, human, now_unix, tool_name};
 
@@ -29,6 +31,7 @@ pub(crate) struct BackupArgs {
     pub keep_system_files: bool,
     pub files_not_to_backup: ExclusionChoice,
     pub comment: Option<String>,
+    pub all_sectors: bool,
 }
 
 pub(crate) fn list() -> Result<()> {
@@ -100,7 +103,7 @@ fn short_name(volume: &VolumeInfo) -> String {
 }
 
 /// The hash list for a differential backup, or `None` for a full backup.
-fn load_base(args: &BackupArgs) -> Result<Option<HashList>> {
+pub(crate) fn load_base(args: &BackupArgs) -> Result<Option<HashList>> {
     let Some(path) = &args.diff else {
         return Ok(None);
     };
@@ -115,6 +118,13 @@ fn load_base(args: &BackupArgs) -> Result<Option<HashList>> {
 }
 
 pub(crate) fn backup(args: BackupArgs) -> Result<()> {
+    if let Some(number) = parse_disk(&args.source) {
+        return backup_disk(args, number);
+    }
+    anyhow::ensure!(
+        !args.all_sectors,
+        "--all-sectors is for disks (HD0, HD1, ...); volumes are always read by their used blocks"
+    );
     enable_backup_privileges();
     let volume = resolve_volume(&args.source)
         .with_context(|| format!("volume {} not found", args.source))?;
@@ -222,12 +232,53 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
         }
     }
 
+    write_image(
+        &args,
+        ImageJob {
+            source,
+            used,
+            info: source_info(&volume, size),
+            disk: None,
+            base,
+            name: volume.display_name().to_string(),
+        },
+    )?;
+    if let Some(set) = snapshot {
+        set.complete()?;
+    }
+    Ok(())
+}
+
+/// What [`write_image`] saves.
+pub(crate) struct ImageJob<'a> {
+    pub source: &'a dyn BlockSource,
+    pub used: RangeSet,
+    pub info: SourceInfo,
+    pub disk: Option<DiskSummary>,
+    /// Hash list of the full image for a differential backup.
+    pub base: Option<HashList>,
+    /// Volume or disk name for messages.
+    pub name: String,
+}
+
+/// Writes the image and its hash list; deletes a partly written image.
+pub(crate) fn write_image(args: &BackupArgs, job: ImageJob<'_>) -> Result<()> {
+    let ImageJob {
+        source,
+        used,
+        info,
+        disk,
+        base,
+        name,
+    } = job;
+    let size = info.size_bytes;
     let mut header = FileHeader::new(ImageMetadata {
         tool: tool_name(),
         created_unix: now_unix(),
         comment: args.comment.clone(),
-        source: source_info(&volume, size),
+        source: info,
         base_image_name: None,
+        disk,
     });
     if let (Some(base), Some(hash_file)) = (&base, &args.diff) {
         header.base_image_id = Some(base.image_id);
@@ -241,13 +292,13 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
 
     let writer = ImageWriter::new(args.common.create_sink(&args.image)?, header)?;
     note!(
-        "{} backup of {} ({} of {} in use) to {}",
+        "{} backup of {} ({} of {} selected) to {}",
         if base.is_some() {
             "Differential"
         } else {
             "Full"
         },
-        volume.display_name(),
+        name,
         human(used.total_len()),
         human(size),
         args.image.display()
@@ -275,9 +326,6 @@ pub(crate) fn backup(args: BackupArgs) -> Result<()> {
             return Err(error);
         }
     };
-    if let Some(set) = snapshot {
-        set.complete()?;
-    }
 
     // A differential backup keeps the full image's hash list; its own list
     // is only written on request. A full backup made because the --diff list
@@ -347,7 +395,30 @@ fn source_info(volume: &VolumeInfo, size: u64) -> SourceInfo {
     }
 }
 
-pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool) -> Result<()> {
+pub(crate) fn restore(
+    image: &Path,
+    target: &str,
+    base: Option<&Path>,
+    partition: Option<u32>,
+    yes: bool,
+) -> Result<()> {
+    let opened = open_view(image, base)?;
+    let mut image_files = vec![image.to_path_buf()];
+    image_files.extend(opened.base_path.clone());
+    match (parse_disk(target), opened.is_disk(), partition) {
+        (Some(number), true, None) => return restore_disk(opened, number, &image_files, yes),
+        (Some(_), true, Some(_)) => {
+            bail!("--partition restores one partition onto a volume (e.g. X:), not onto a disk")
+        }
+        (Some(_), false, _) => bail!("this is a volume image; restore it onto a volume such as X:"),
+        (None, true, None) => bail!(
+            "this is a disk image; restore it onto a whole disk (HD1, ... see `volsave list`) \
+             or pick one partition with --partition N"
+        ),
+        (None, false, Some(_)) => bail!("--partition needs a disk image"),
+        _ => {}
+    }
+
     let volume = resolve_volume(target).with_context(|| format!("volume {target} not found"))?;
     let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()) + "\\";
     if volume
@@ -361,9 +432,6 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
         );
     }
 
-    let mut opened = open_view(image, base)?;
-    let mut image_files = vec![image.to_path_buf()];
-    image_files.extend(opened.base_path.clone());
     for file in &image_files {
         let root = std::path::absolute(file)?
             .to_string_lossy()
@@ -383,7 +451,25 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
         }
     }
 
-    let source = opened.header.metadata.source.clone();
+    let mut source = opened.header.metadata.source.clone();
+    let base_path = opened.base_path.clone();
+    let summary = opened.header.metadata.disk.clone();
+    let mut view = match partition {
+        Some(number) => {
+            let (view, p) = opened.into_partition(number)?;
+            let listed = summary
+                .iter()
+                .flat_map(|s| &s.partitions)
+                .find(|s| s.number == number);
+            source.size_bytes = p.length;
+            source.filesystem = listed.and_then(|s| s.filesystem.clone());
+            source.label = listed
+                .and_then(|s| s.label.clone())
+                .or_else(|| Some(format!("partition {number} ({})", p.type_name())));
+            view
+        }
+        None => opened.view,
+    };
     say!(
         "Image:  {} {} ({}), {}",
         source.filesystem.as_deref().unwrap_or("?"),
@@ -391,7 +477,7 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
         human(source.size_bytes),
         source.hostname.as_deref().unwrap_or("unknown computer")
     );
-    if let Some(base_path) = &opened.base_path {
+    if let Some(base_path) = &base_path {
         say!("        differential, full image {}", base_path.display());
     }
     say!(
@@ -421,11 +507,27 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
         .lock_and_dismount()
         .context("the target volume is in use; close all programs and windows using it")?;
     let mut printer = ProgressPrinter::new("Restore");
-    let stats = run_restore(opened.view.as_mut(), &mut device, &CANCEL, |p| {
-        printer.update(p)
-    })?;
+    let stats = run_restore(view.as_mut(), &mut device, &CANCEL, |p| printer.update(p))?;
     printer.finish();
     say!("Done: {} written", human(stats.bytes_written));
+    // The boot code finds BOOTMGR through the start sector stored in the boot
+    // sector, which is wrong when the partition sits elsewhere than the source.
+    if let [extent] = volume.extents.as_slice() {
+        match fix_ntfs_hidden_sectors(&mut device, extent.offset) {
+            Ok(Some(fix)) => say!(
+                "Boot sector: start sector changed from {} to {}{}",
+                fix.old,
+                fix.new,
+                if fix.backup_fixed {
+                    ""
+                } else {
+                    " (backup boot sector not found)"
+                }
+            ),
+            Ok(None) => {}
+            Err(e) => warn!("could not update the boot sector: {e}"),
+        }
+    }
     if volume.size > source.size_bytes {
         say!(
             "note: the volume is {} larger than the image; extend the file system in Disk Management to use it",
@@ -435,7 +537,7 @@ pub(crate) fn restore(image: &Path, target: &str, base: Option<&Path>, yes: bool
     Ok(())
 }
 
-fn confirm(question: &str) -> Result<bool> {
+pub(crate) fn confirm(question: &str) -> Result<bool> {
     eprint!("{question}");
     std::io::stderr().flush()?;
     let mut answer = String::new();
@@ -443,7 +545,7 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(answer.trim() == "YES")
 }
 
-fn mode(choice: ExclusionChoice) -> ExclusionMode {
+pub(crate) fn mode(choice: ExclusionChoice) -> ExclusionMode {
     match choice {
         ExclusionChoice::Safe => ExclusionMode::Safe,
         ExclusionChoice::All => ExclusionMode::All,

@@ -1,14 +1,15 @@
 //! Opening images (with their full image, if differential) and hash lists.
 
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
-use volsave_core::{ImageView, LayeredImage, SingleImage};
+use volsave_core::{DiskLayout, ImageView, LayeredImage, Partition, PartitionView, SingleImage};
 use volsave_format::{
-    FileHeader, HASH_LIST_EXTENSION, HashList, IMAGE_EXTENSION, ImageReader, SplitReader,
+    FileHeader, HASH_LIST_EXTENSION, HashList, IMAGE_EXTENSION, ImageReader, SourceKind,
+    SplitReader,
 };
 
 pub(crate) type Reader = ImageReader<SplitReader>;
@@ -34,6 +35,38 @@ pub(crate) struct OpenedImage {
     pub header: FileHeader,
     /// Path of the full image, for differential images.
     pub base_path: Option<PathBuf>,
+}
+
+impl OpenedImage {
+    pub(crate) fn is_disk(&self) -> bool {
+        self.header.metadata.source.kind == SourceKind::Disk
+    }
+
+    /// The partition table stored in a disk image.
+    pub(crate) fn layout(&mut self) -> Result<DiskLayout> {
+        let size = self.view.source_size();
+        let sector_size = self.header.metadata.source.sector_size.max(512);
+        let view = &mut self.view;
+        DiskLayout::read(
+            &mut |offset, buf| view.read_at(offset, buf).map_err(io::Error::other),
+            size,
+            sector_size,
+        )
+        .context("cannot read the partition table stored in the image")
+    }
+
+    /// Narrows a disk image to one of its partitions.
+    pub(crate) fn into_partition(mut self, number: u32) -> Result<(Box<dyn ImageView>, Partition)> {
+        anyhow::ensure!(self.is_disk(), "--partition needs a disk image");
+        let layout = self.layout()?;
+        let partition = layout
+            .partitions
+            .into_iter()
+            .find(|p| p.number == number)
+            .with_context(|| format!("the image has no partition {number} (see `volsave info`)"))?;
+        let view = PartitionView::new(self.view, partition.range());
+        Ok((Box::new(view), partition))
+    }
 }
 
 pub(crate) fn open_view(path: &Path, base: Option<&Path>) -> Result<OpenedImage> {

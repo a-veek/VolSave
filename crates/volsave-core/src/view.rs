@@ -148,3 +148,37 @@ impl<R: Read + Seek + Send> ImageView for LayeredImage<R> {
         self.diff.overlay(offset, out)
     }
 }
+
+/// One partition of a disk image, seen as a volume image.
+pub struct PartitionView {
+    disk: Box<dyn ImageView>,
+    range: std::ops::Range<u64>,
+}
+
+impl PartitionView {
+    pub fn new(disk: Box<dyn ImageView>, range: std::ops::Range<u64>) -> Self {
+        Self { disk, range }
+    }
+}
+
+impl ImageView for PartitionView {
+    fn source_size(&self) -> u64 {
+        self.range.end - self.range.start
+    }
+
+    fn regions(&self) -> RangeSet {
+        let start = self.range.start;
+        RangeSet::from_ranges(
+            self.disk
+                .regions()
+                .clamp(self.range.clone())
+                .ranges()
+                .iter()
+                .map(|r| r.start - start..r.end - start),
+        )
+    }
+
+    fn read_at(&mut self, offset: u64, out: &mut [u8]) -> volsave_format::Result<()> {
+        self.disk.read_at(self.range.start + offset, out)
+    }
+}

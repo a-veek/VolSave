@@ -23,6 +23,7 @@ fn metadata() -> ImageMetadata {
             ..SourceInfo::default()
         },
         base_image_name: None,
+        disk: None,
     }
 }
 

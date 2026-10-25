@@ -6,19 +6,29 @@
 //! differential image with its full image.
 
 mod backup;
+mod bootsector;
 mod buffer;
 mod exclusion;
+mod partition;
 mod ranges;
 mod restore;
 mod source;
 mod view;
 
 pub use backup::{BackupError, BackupOptions, BackupOutput, BackupStats, Progress, backup};
+pub use bootsector::{
+    BootSectorKind, HiddenSectorsFix, fix_ntfs_hidden_sectors, identify_boot_sector,
+};
 pub use buffer::AlignedBuf;
 pub use exclusion::{PathRule, wildcard_match};
-pub use ranges::{BlockPlan, PlannedBlock, RangeSet};
-pub use restore::{RestoreError, RestoreStats, merge, restore};
-pub use source::{
-    BlockSource, BlockTarget, FileSource, FileTarget, PatchedSource, read_exact_at, write_all_at,
+pub use partition::{
+    DiskLayout, Gpt, Guid, LayoutError, Partition, PartitionKind, PartitionStyle, Retarget,
+    gpt_types,
 };
-pub use view::{ImageView, LayerError, LayeredImage, SingleImage};
+pub use ranges::{BlockPlan, PlannedBlock, RangeSet};
+pub use restore::{RestoreError, RestoreStats, merge, restore, restore_disk};
+pub use source::{
+    BlockSource, BlockTarget, FileSource, FileTarget, MappedSource, PatchedSource, read_exact_at,
+    write_all_at,
+};
+pub use view::{ImageView, LayerError, LayeredImage, PartitionView, SingleImage};

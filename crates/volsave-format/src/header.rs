@@ -51,6 +51,39 @@ pub struct ImageMetadata {
     /// For differential images: file name of the full image they build on,
     /// as a hint for finding it. The base image id in the header is binding.
     pub base_image_name: Option<String>,
+    /// For disk images: the partitions, for display. Restores read the
+    /// partition table from the image data itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiskSummary {
+    /// `MBR` or `GPT`.
+    pub style: String,
+    /// MBR signature (8 hex digits) or GPT disk GUID in braces.
+    pub disk_id: String,
+    pub model: Option<String>,
+    pub partitions: Vec<PartitionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PartitionSummary {
+    /// Number in the partition table (MBR logical partitions from 5).
+    pub number: u32,
+    pub offset: u64,
+    pub length: u64,
+    /// Partition type, e.g. `EFI system` or `NTFS/exFAT`.
+    pub kind: String,
+    pub filesystem: Option<String>,
+    pub label: Option<String>,
+    pub mount_points: Vec<String>,
+    /// How the content was read, e.g. `used blocks, VSS snapshot`.
+    pub method: String,
+    /// Bytes of this partition selected for the image.
+    pub bytes_selected: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

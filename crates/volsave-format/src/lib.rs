@@ -23,7 +23,9 @@ mod writer;
 pub use block::{BlockEncoding, BlockHeader, EncodedBlock, encode_block};
 pub use error::{Error, Result};
 pub use hashlist::{ChunkHash, HashList, UNUSED_CHUNK, chunk_hash};
-pub use header::{FileHeader, ImageMetadata, SourceInfo, SourceKind};
+pub use header::{
+    DiskSummary, FileHeader, ImageMetadata, PartitionSummary, SourceInfo, SourceKind,
+};
 pub use index::IndexEntry;
 pub use reader::{ImageReader, VerifyReport};
 pub use split::{SplitReader, SplitWriter, part_path};

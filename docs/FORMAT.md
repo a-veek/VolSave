@@ -52,6 +52,40 @@ for missing ones:
 }
 ```
 
+### Disk images
+
+With `source.kind` = `"disk"` the image is a whole disk: offsets are byte
+offsets on the disk, `size_bytes` is the disk size and `sector_size` its
+logical sector size. The image always contains the partition table with
+everything before the first partition, every extended boot record and the
+backup GPT; the partitions contribute their used blocks (or all sectors).
+A restore reads the partition table from these bytes, not from the
+metadata. The metadata adds a summary for display:
+
+```json
+"disk": {
+  "style": "GPT",
+  "disk_id": "{6f1c...}",
+  "model": "Samsung SSD 980",
+  "partitions": [
+    {
+      "number": 3,
+      "offset": 290455552,
+      "length": 511705235456,
+      "kind": "Basic data",
+      "filesystem": "NTFS",
+      "label": "System",
+      "mount_points": ["C:\\"],
+      "method": "used blocks, VSS snapshot",
+      "bytes_selected": 98213412864
+    }
+  ]
+}
+```
+
+Partition numbers follow the table: GPT entry index + 1; MBR primary slots
+1 to 4 and logical partitions from 5 on.
+
 ## Block
 
 | Offset | Size | Field |

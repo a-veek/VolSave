@@ -7,7 +7,10 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use volsave_core::{BackupOptions, BlockSource, RangeSet, backup};
-use volsave_format::{FileHeader, ImageMetadata, ImageWriter, SplitWriter};
+use volsave_format::{
+    DiskSummary, FileHeader, ImageMetadata, ImageWriter, PartitionSummary, SourceInfo, SourceKind,
+    SplitWriter,
+};
 
 struct Pattern;
 
@@ -122,4 +125,97 @@ fn log_options_choose_or_suppress_the_file() {
             .unwrap()
             .contains("info")
     );
+}
+
+/// A 4 MiB MBR disk with two partitions: 1 MiB at 1 MiB and 1 MiB at 2 MiB.
+struct MbrDisk(Vec<u8>);
+
+impl MbrDisk {
+    fn new() -> Self {
+        let mut disk = vec![0u8; 4 << 20];
+        for (slot, start) in [(0usize, 2048u32), (1, 4096)] {
+            let e = &mut disk[446 + slot * 16..][..16];
+            e[4] = 0x07;
+            e[8..12].copy_from_slice(&start.to_le_bytes());
+            e[12..16].copy_from_slice(&2048u32.to_le_bytes());
+        }
+        disk[510] = 0x55;
+        disk[511] = 0xAA;
+        for (i, byte) in disk[1 << 20..3 << 20].iter_mut().enumerate() {
+            *byte = (i % 241) as u8 | 1;
+        }
+        Self(disk)
+    }
+}
+
+impl BlockSource for MbrDisk {
+    fn size(&self) -> u64 {
+        self.0.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        buf.copy_from_slice(&self.0[offset as usize..offset as usize + buf.len()]);
+        Ok(())
+    }
+}
+
+#[test]
+fn disk_images_show_partitions_and_extract_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disk.dimg");
+    let disk = MbrDisk::new();
+    let metadata = ImageMetadata {
+        source: SourceInfo {
+            kind: SourceKind::Disk,
+            device: r"\\.\PhysicalDrive1".into(),
+            size_bytes: disk.size(),
+            sector_size: 512,
+            ..SourceInfo::default()
+        },
+        disk: Some(DiskSummary {
+            style: "MBR".into(),
+            disk_id: "00000000".into(),
+            model: Some("Test disk".into()),
+            partitions: vec![PartitionSummary {
+                number: 2,
+                offset: 2 << 20,
+                length: 1 << 20,
+                kind: "NTFS/exFAT".into(),
+                method: "all sectors".into(),
+                ..PartitionSummary::default()
+            }],
+        }),
+        ..ImageMetadata::default()
+    };
+    let writer = ImageWriter::new(
+        SplitWriter::create(&path, None).unwrap(),
+        FileHeader::new(metadata),
+    )
+    .unwrap();
+    let output = backup(
+        &disk,
+        &RangeSet::full(3 << 20),
+        writer,
+        None,
+        &BackupOptions::default(),
+        &AtomicBool::new(false),
+        |_| {},
+    )
+    .unwrap();
+    output.sink.finish().unwrap();
+    let image = path.to_str().unwrap();
+
+    let info = volsave(&["info", image]);
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(text.contains("Disk:         MBR 00000000"), "{text}");
+    assert!(text.contains("#2"), "{text}");
+
+    let part = dir.path().join("p2.img");
+    let extract = volsave(&["extract", image, part.to_str().unwrap(), "--partition", "2"]);
+    assert_eq!(extract.status.code(), Some(0), "{extract:?}");
+    assert!(fs::read(&part).unwrap() == disk.0[2 << 20..3 << 20]);
+
+    let missing = volsave(&["extract", image, part.to_str().unwrap(), "--partition", "3"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no partition 3"));
 }

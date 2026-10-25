@@ -2,9 +2,12 @@ use std::io;
 use std::mem::offset_of;
 
 use windows::Win32::System::Ioctl::{
-    DISK_GEOMETRY_EX, DRIVE_LAYOUT_INFORMATION_EX, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-    IOCTL_DISK_GET_DRIVE_LAYOUT_EX, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_INFORMATION_EX,
-    PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, STORAGE_DEVICE_DESCRIPTOR,
+    DISK_ATTRIBUTE_OFFLINE, DISK_ATTRIBUTE_READ_ONLY, DISK_GEOMETRY_EX,
+    DRIVE_LAYOUT_INFORMATION_EX, GET_DISK_ATTRIBUTES, IOCTL_DISK_GET_DISK_ATTRIBUTES,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+    IOCTL_DISK_SET_DISK_ATTRIBUTES, IOCTL_DISK_UPDATE_PROPERTIES, IOCTL_STORAGE_QUERY_PROPERTY,
+    PARTITION_INFORMATION_EX, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, SET_DISK_ATTRIBUTES,
+    STORAGE_DEVICE_DESCRIPTOR,
 };
 
 use crate::util::{Access, format_guid, from_wide, ioctl, open, read_struct};
@@ -212,4 +215,68 @@ fn read_layout(device: &std::fs::File) -> io::Result<DiskLayout> {
         },
         _ => DiskLayout::Raw,
     })
+}
+
+/// Opens a disk for restoring.
+pub fn open_disk_for_writing(number: u32) -> io::Result<std::fs::File> {
+    open(
+        &format!(r"\\.\PhysicalDrive{number}"),
+        Access::ReadWrite,
+        false,
+    )
+}
+
+/// Whether the disk is offline and whether it is read-only.
+pub fn disk_attributes(disk: &std::fs::File) -> io::Result<(bool, bool)> {
+    let raw = ioctl(
+        disk,
+        IOCTL_DISK_GET_DISK_ATTRIBUTES,
+        &[],
+        size_of::<GET_DISK_ATTRIBUTES>(),
+    )?;
+    // SAFETY: GET_DISK_ATTRIBUTES consists of integers only.
+    let attributes: GET_DISK_ATTRIBUTES = unsafe { read_struct(&raw, 0)? };
+    Ok((
+        attributes.Attributes & DISK_ATTRIBUTE_OFFLINE != 0,
+        attributes.Attributes & DISK_ATTRIBUTE_READ_ONLY != 0,
+    ))
+}
+
+/// Takes a disk offline or online and sets its read-only flag. With
+/// `persist` the state survives a reboot.
+pub fn set_disk_attributes(
+    disk: &std::fs::File,
+    offline: bool,
+    read_only: bool,
+    persist: bool,
+) -> io::Result<()> {
+    let mut attributes = 0;
+    if offline {
+        attributes |= DISK_ATTRIBUTE_OFFLINE;
+    }
+    if read_only {
+        attributes |= DISK_ATTRIBUTE_READ_ONLY;
+    }
+    let request = SET_DISK_ATTRIBUTES {
+        Version: size_of::<SET_DISK_ATTRIBUTES>() as u32,
+        Persist: persist,
+        Attributes: attributes,
+        AttributesMask: DISK_ATTRIBUTE_OFFLINE | DISK_ATTRIBUTE_READ_ONLY,
+        ..Default::default()
+    };
+    // SAFETY: SET_DISK_ATTRIBUTES is a plain C struct; viewing it as bytes is sound.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&raw const request).cast::<u8>(),
+            size_of::<SET_DISK_ATTRIBUTES>(),
+        )
+    };
+    ioctl(disk, IOCTL_DISK_SET_DISK_ATTRIBUTES, bytes, 0)?;
+    Ok(())
+}
+
+/// Makes Windows read the partition table again after it was written raw.
+pub fn refresh_disk(disk: &std::fs::File) -> io::Result<()> {
+    ioctl(disk, IOCTL_DISK_UPDATE_PROPERTIES, &[], 0)?;
+    Ok(())
 }

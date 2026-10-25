@@ -15,7 +15,10 @@ mod vss;
 
 pub use allocation::{Allocation, file_extents, system_file_extents, used_ranges};
 pub use device::RawDevice;
-pub use disk::{DiskInfo, DiskLayout, PartitionInfo, PartitionKind, list_disks};
+pub use disk::{
+    DiskInfo, DiskLayout, PartitionInfo, PartitionKind, disk_attributes, list_disks,
+    open_disk_for_writing, refresh_disk, set_disk_attributes,
+};
 pub use exclusions::{ExcludedEntry, ExclusionMode, excluded_files, files_not_to_backup};
 pub use privileges::enable_backup_privileges;
 pub use util::{format_guid, set_debug_hook};
