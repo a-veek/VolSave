@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use volsave_core::{
-    AlignedBuf, BlockSource, PatchedSource, RangeSet, backup as run_backup,
-    fix_ntfs_hidden_sectors, restore as run_restore,
+    AlignedBuf, BlockSource, ImageView, PatchedSource, RangeSet, backup as run_backup,
+    fix_ntfs_hidden_sectors, restore as run_restore, verify_target,
 };
 use volsave_format::{
     DiskSummary, FileHeader, HashList, IMAGE_EXTENSION, ImageMetadata, ImageWriter, SourceInfo,
@@ -342,16 +342,20 @@ pub(crate) fn write_image(args: &BackupArgs, job: ImageJob<'_>) -> Result<()> {
     }
 
     let seconds = printer.elapsed().as_secs();
-    // For a differential image the interesting number is how much changed.
-    let changed = match base {
-        Some(_) => format!(", {} changed", human(stats.bytes_stored)),
-        None => String::new(),
-    };
+    // Blocks are whole block-size pieces, so they also hold the free space
+    // between used ranges; verify and restore count that size. For a
+    // differential image it is what changed.
     say!(
-        "Done: {} read{changed}, image {} ({:.0}%) in {} file(s), {}:{:02} min",
+        "Done: {} read, {} {}, image {} ({:.0}%) in {} file(s), {}:{:02} min",
         human(stats.bytes_read),
+        human(stats.bytes_stored),
+        if base.is_some() {
+            "changed"
+        } else {
+            "in blocks"
+        },
         human(stats.bytes_written),
-        stats.bytes_written as f64 * 100.0 / stats.bytes_read.max(1) as f64,
+        stats.bytes_written as f64 * 100.0 / stats.bytes_stored.max(1) as f64,
         parts,
         seconds / 60,
         seconds % 60
@@ -401,12 +405,15 @@ pub(crate) fn restore(
     base: Option<&Path>,
     partition: Option<u32>,
     yes: bool,
+    verify: bool,
 ) -> Result<()> {
     let opened = open_view(image, base)?;
     let mut image_files = vec![image.to_path_buf()];
     image_files.extend(opened.base_path.clone());
     match (parse_disk(target), opened.is_disk(), partition) {
-        (Some(number), true, None) => return restore_disk(opened, number, &image_files, yes),
+        (Some(number), true, None) => {
+            return restore_disk(opened, number, &image_files, yes, verify);
+        }
         (Some(_), true, Some(_)) => {
             bail!("--partition restores one partition onto a volume (e.g. X:), not onto a disk")
         }
@@ -510,6 +517,10 @@ pub(crate) fn restore(
     let stats = run_restore(view.as_mut(), &mut device, &CANCEL, |p| printer.update(p))?;
     printer.finish();
     say!("Done: {} written", human(stats.bytes_written));
+    // Before the boot sector fix, which changes what the image holds.
+    if verify {
+        verify_restored(view.as_mut(), &device, &stats.copied)?;
+    }
     // The boot code finds BOOTMGR through the start sector stored in the boot
     // sector, which is wrong when the partition sits elsewhere than the source.
     if let [extent] = volume.extents.as_slice() {
@@ -534,6 +545,24 @@ pub(crate) fn restore(
             human(volume.size - source.size_bytes)
         );
     }
+    Ok(())
+}
+
+/// Reads the restored ranges back from the target and compares them with
+/// the image.
+pub(crate) fn verify_restored(
+    view: &mut dyn ImageView,
+    target: &RawDevice,
+    copied: &RangeSet,
+) -> Result<()> {
+    let mut printer = ProgressPrinter::new("Verifying target");
+    let result = verify_target(view, target, copied, &CANCEL, |p| printer.update(p));
+    printer.finish();
+    let checked = result.context("verification of the restored data failed")?;
+    say!(
+        "Verified: {} read back, identical to the image",
+        human(checked)
+    );
     Ok(())
 }
 

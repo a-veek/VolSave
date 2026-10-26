@@ -12,9 +12,12 @@ use crate::{
 /// Largest single write during a restore.
 const RESTORE_CHUNK: u32 = 1 << 20;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RestoreStats {
     pub bytes_written: u64,
+    /// Target ranges that now hold exactly the image content; what
+    /// [`verify_target`] compares. Moved or patched tables are left out.
+    pub copied: RangeSet,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +34,14 @@ pub enum RestoreError {
     Format(#[from] volsave_format::Error),
     #[error(transparent)]
     Layout(#[from] LayoutError),
+    #[error("read error at target offset {offset}: {source}")]
+    Read {
+        offset: u64,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the target differs from the image at offset {offset}")]
+    Mismatch { offset: u64 },
     #[error("restore cancelled")]
     Cancelled,
 }
@@ -59,6 +70,7 @@ pub fn restore(
     flush(target)?;
     Ok(RestoreStats {
         bytes_written: report.bytes_written,
+        copied: regions,
     })
 }
 
@@ -112,9 +124,58 @@ pub fn restore_disk(
         write_aligned(target, *offset, data)?;
     }
     flush(target)?;
+
+    let overwritten = RangeSet::from_ranges(
+        plan.zero
+            .iter()
+            .cloned()
+            .chain(plan.writes.iter().map(|(o, d)| *o..*o + d.len() as u64)),
+    );
+    let patched = RangeSet::from_ranges(plan.patches.iter().map(|(o, d)| *o..*o + d.len() as u64));
     Ok(RestoreStats {
         bytes_written: report.bytes_written,
+        copied: body.subtract(&overwritten).union(&head).subtract(&patched),
     })
+}
+
+/// Reads `ranges` back from `target` and compares them with the image.
+/// Returns the number of bytes compared.
+pub fn verify_target(
+    image: &mut dyn ImageView,
+    target: &dyn BlockSource,
+    ranges: &RangeSet,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(&Progress),
+) -> Result<u64, RestoreError> {
+    let mut report = Progress {
+        bytes_total: ranges.total_len(),
+        ..Progress::default()
+    };
+    for block in ranges.plan(RESTORE_CHUNK) {
+        for part in &block.parts {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(RestoreError::Cancelled);
+            }
+            let len = (part.end - part.start) as usize;
+            let mut expected = vec![0; len];
+            image.read_at(part.start, &mut expected)?;
+            let mut found = AlignedBuf::zeroed(len);
+            target
+                .read_at(part.start, &mut found)
+                .map_err(|source| RestoreError::Read {
+                    offset: part.start,
+                    source,
+                })?;
+            if let Some(i) = expected.iter().zip(found.iter()).position(|(a, b)| a != b) {
+                return Err(RestoreError::Mismatch {
+                    offset: part.start + i as u64,
+                });
+            }
+            report.add(len as u64);
+            progress(&report);
+        }
+    }
+    Ok(report.bytes_read)
 }
 
 fn copy_regions(
@@ -340,6 +401,29 @@ mod tests {
         );
         assert!(matches!(result, Err(RestoreError::Layout(_))));
         assert!(target.0.iter().all(|&b| b == 0), "nothing written");
+    }
+
+    #[test]
+    fn verify_target_accepts_a_restored_disk_and_finds_a_changed_byte() {
+        let (_, image, layout) = image_of(gpt_disk(32 << 20));
+        let mut view = SingleImage::new(ImageReader::open(Cursor::new(image)).unwrap());
+        // A larger target moves the backup GPT and patches the primary one.
+        let mut target = Disk(vec![0xEE; 40 << 20]);
+        let cancel = AtomicBool::new(false);
+        let stats = restore_disk(&mut view, &mut target, &layout, &cancel, |_| {}).unwrap();
+        assert!(
+            !stats.copied.ranges().iter().any(|r| r.start == 0),
+            "patched MBR left out"
+        );
+        let checked = verify_target(&mut view, &target, &stats.copied, &cancel, |_| {}).unwrap();
+        assert_eq!(checked, stats.copied.total_len());
+
+        let p = &layout.partitions[0];
+        target.0[(p.offset + 4097) as usize] ^= 1;
+        let result = verify_target(&mut view, &target, &stats.copied, &cancel, |_| {});
+        assert!(
+            matches!(result, Err(RestoreError::Mismatch { offset }) if offset == p.offset + 4097)
+        );
     }
 
     #[test]

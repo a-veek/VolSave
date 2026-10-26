@@ -16,7 +16,9 @@ use volsave_win::{
 };
 
 use crate::images::OpenedImage;
-use crate::windows_cmds::{BackupArgs, ImageJob, confirm, load_base, mode, write_image};
+use crate::windows_cmds::{
+    BackupArgs, ImageJob, confirm, load_base, mode, verify_restored, write_image,
+};
 use crate::{CANCEL, ExclusionChoice, ProgressPrinter, human};
 
 /// Unpartitioned areas up to this size are saved, larger ones skipped.
@@ -444,6 +446,7 @@ pub(crate) fn restore_disk(
     number: u32,
     image_files: &[PathBuf],
     yes: bool,
+    verify: bool,
 ) -> Result<()> {
     let disk = find_disk(number)?;
     let layout = opened.layout()?;
@@ -591,6 +594,14 @@ pub(crate) fn restore_disk(
         printer.update(p)
     });
     printer.finish();
+    if let Ok(stats) = &result {
+        say!("Done: {} written", human(stats.bytes_written));
+    }
+    // While the volumes are still locked, before Windows sees the new table.
+    let verified = match &result {
+        Ok(stats) if verify => verify_restored(opened.view.as_mut(), &target, &stats.copied),
+        _ => Ok(()),
+    };
     drop(target);
     drop(locked);
     if let Err(error) = refresh_disk(&control) {
@@ -598,10 +609,10 @@ pub(crate) fn restore_disk(
             "Windows could not re-read the partition table of HD{number} ({error}); restart before using the disk"
         );
     }
-    let stats = result.with_context(|| {
+    result.with_context(|| {
         format!("restore of HD{number} failed; the disk is incomplete and must be restored again")
     })?;
-    say!("Done: {} written", human(stats.bytes_written));
+    verified.with_context(|| format!("HD{number} does not match the image; restore it again"))?;
 
     // A second disk with the same ID makes Windows keep this one offline;
     // bringing it online would give it a new ID and break its boot entries.

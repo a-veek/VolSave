@@ -26,7 +26,7 @@ pub use partition::{
     gpt_types,
 };
 pub use ranges::{BlockPlan, PlannedBlock, RangeSet};
-pub use restore::{RestoreError, RestoreStats, merge, restore, restore_disk};
+pub use restore::{RestoreError, RestoreStats, merge, restore, restore_disk, verify_target};
 pub use source::{
     BlockSource, BlockTarget, FileSource, FileTarget, MappedSource, PatchedSource, read_exact_at,
     write_all_at,

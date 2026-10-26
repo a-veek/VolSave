@@ -39,7 +39,7 @@ volsave merge E:\backup\c-mon.dimg E:\backup\c-new.dimg
 
 volsave backup HD0 E:\backup\disk0.dimg            # whole disk 0
 volsave info E:\backup\disk0.dimg                  # shows the partitions
-volsave restore E:\backup\disk0.dimg HD1           # clone onto disk 1
+volsave restore E:\backup\disk0.dimg HD1 --verify  # clone onto disk 1, read back
 volsave restore E:\backup\disk0.dimg F: --partition 2
 ```
 

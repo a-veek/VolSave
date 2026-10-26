@@ -102,6 +102,9 @@ enum Command {
         /// Do not ask for confirmation
         #[arg(long)]
         yes: bool,
+        /// Read the written data back and compare it with the image
+        #[arg(long)]
+        verify: bool,
     },
     /// Combine a differential image and its full image into a new full image
     Merge {
@@ -273,7 +276,8 @@ fn run(command: Command) -> Result<()> {
             base,
             partition,
             yes,
-        } => windows_cmds::restore(&image, &target, base.as_deref(), partition, yes),
+            verify,
+        } => windows_cmds::restore(&image, &target, base.as_deref(), partition, yes, verify),
         #[cfg(not(windows))]
         Command::List
         | Command::Exclusions { .. }
