@@ -1,0 +1,32 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build volsave.exe and publish a release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 zip
+      - run: rustup update stable && rustup default stable && rustup target add x86_64-pc-windows-gnu
+      - run: cargo test --locked
+      - run: cargo build --locked --release --target x86_64-pc-windows-gnu
+      - name: Package
+        run: |
+          name=volsave-${GITHUB_REF_NAME}-windows-x64
+          mkdir -p dist/$name
+          cp target/x86_64-pc-windows-gnu/release/volsave.exe README.md LICENSE dist/$name/
+          cp target/x86_64-pc-windows-gnu/release/volsave.exe dist/
+          (cd dist && zip -r $name.zip $name && sha256sum volsave.exe $name.zip > SHA256SUMS.txt)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "VolSave $GITHUB_REF_NAME" --generate-notes \
+            dist/volsave.exe dist/volsave-${GITHUB_REF_NAME}-windows-x64.zip dist/SHA256SUMS.txt
