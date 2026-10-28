@@ -15,9 +15,11 @@ and booted. The GUI is not started yet.
 | `crates/volsave-format` | Image format: header, blocks, index, split files, diff hash lists ([spec](docs/FORMAT.md)) |
 | `crates/volsave-core` | Platform-independent engine: used-range planning, parallel backup pipeline, restore |
 | `crates/volsave-win` | Windows: volumes, disks, VSS snapshots, allocation bitmaps, raw device I/O |
+| `crates/volsave-ops` | Operations shared by the command line tool and GUIs: backup, restore, opening images |
 | `crates/volsave-cli` | Command line tool `volsave` |
 
-Planned: storage targets (SMB, FTP, SFTP), Slint GUI.
+Network targets (SMB, FTP, SFTP), encryption and a graphical interface are part of
+the separate commercial product VolSave Pro, which builds on these crates.
 
 ## Building
 
