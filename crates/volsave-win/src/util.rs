@@ -194,3 +194,29 @@ pub(crate) fn debug(message: &str) {
         None => {}
     }
 }
+
+/// Whether this is Windows PE (a rescue or setup environment), which marks
+/// itself with the `MiniNT` key. The installed Windows does not run there,
+/// so its volumes can be read directly; VSS does not work there.
+pub fn is_winpe() -> bool {
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW,
+    };
+    let mut key = HKEY::default();
+    // SAFETY: `key` receives an open handle that is closed right away.
+    let opened = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::w!(r"SYSTEM\CurrentControlSet\Control\MiniNT"),
+            None,
+            KEY_READ,
+            &mut key,
+        )
+    };
+    if opened.is_err() {
+        return false;
+    }
+    // SAFETY: the key was opened above.
+    let _ = unsafe { RegCloseKey(key) };
+    true
+}

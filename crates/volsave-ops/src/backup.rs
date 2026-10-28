@@ -12,7 +12,7 @@ use volsave_format::{
 };
 use volsave_win::{
     ExclusionMode, RawDevice, SnapshotSet, VolumeInfo, enable_backup_privileges, excluded_files,
-    resolve_volume, system_file_extents, used_ranges,
+    is_winpe, resolve_volume, system_file_extents, used_ranges,
 };
 
 use crate::disk::{backup_disk, parse_disk};
@@ -67,6 +67,22 @@ impl BackupRequest {
 
 /// Backs up a volume or a whole disk; a partly written image is deleted.
 pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Reporter) -> Result<()> {
+    // VSS does not work in Windows PE, and it is not needed there: the
+    // installed Windows is not running and does not change its volumes.
+    let without_vss;
+    let request = if !request.no_vss && is_winpe() {
+        note!(
+            rep,
+            "Windows PE: the installed Windows is not running; volumes are read directly without VSS snapshots"
+        );
+        without_vss = BackupRequest {
+            no_vss: true,
+            ..request.clone()
+        };
+        &without_vss
+    } else {
+        request
+    };
     if let Some(number) = parse_disk(&request.source) {
         return backup_disk(request, number, cancel, rep);
     }
@@ -104,7 +120,7 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
             "Creating VSS snapshot of {} ...",
             volume.display_name()
         );
-        let set = SnapshotSet::create(&[&volume.guid_path])?;
+        let set = SnapshotSet::create(&[&volume.guid_path]).context(VSS_HINT)?;
         for warning in set.warnings() {
             warn!(rep, "{warning}");
         }
@@ -237,6 +253,9 @@ pub(crate) fn load_base(
     }
     read_hash_list(path).map(Some)
 }
+
+/// Added to VSS errors.
+pub(crate) const VSS_HINT: &str = "VSS snapshot failed; if Windows on this disk is not running (rescue system) or VSS does not work, back up with --no-vss";
 
 /// What [`write_image`] saves.
 pub(crate) struct ImageJob<'a> {

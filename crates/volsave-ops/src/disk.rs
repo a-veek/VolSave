@@ -16,7 +16,7 @@ use volsave_win::{
     open_disk_for_writing, refresh_disk, set_disk_attributes, system_file_extents, used_ranges,
 };
 
-use crate::backup::{BackupRequest, ImageJob, load_base, write_image};
+use crate::backup::{BackupRequest, ImageJob, VSS_HINT, load_base, write_image};
 use crate::images::OpenedImage;
 use crate::restore::verify_restored;
 use crate::{Reporter, Stage, human};
@@ -350,13 +350,13 @@ fn create_snapshot(
         }
     }
     if !fallback {
-        return Err(error);
+        return Err(error.context(VSS_HINT));
     }
     warn!(
         rep,
         "VSS snapshot failed ({error:#}); copying the small volumes without drive letter sector by sector and retrying"
     );
-    create(&volumes(methods), rep)
+    create(&volumes(methods), rep).context(VSS_HINT)
 }
 
 /// Used ranges of a snapshotted volume minus the files that are not saved,

@@ -21,6 +21,6 @@ pub use disk::{
 };
 pub use exclusions::{ExcludedEntry, ExclusionMode, excluded_files, files_not_to_backup};
 pub use privileges::enable_backup_privileges;
-pub use util::{format_guid, set_debug_hook};
+pub use util::{format_guid, is_winpe, set_debug_hook};
 pub use volume::{DiskExtent, VolumeInfo, list_volumes, resolve_volume};
 pub use vss::{Snapshot, SnapshotSet, VssError};
