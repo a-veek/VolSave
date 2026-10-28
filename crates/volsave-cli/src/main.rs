@@ -2,23 +2,23 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use volsave_core::{BackupOptions, FileTarget, Progress, merge as run_merge, restore};
-use volsave_format::{DEFAULT_ZSTD_LEVEL, FileHeader, ImageMetadata, ImageWriter, SplitWriter};
+use volsave_core::{FileTarget, Progress, merge as run_merge, restore};
+use volsave_format::{DEFAULT_ZSTD_LEVEL, FileHeader, ImageMetadata, ImageWriter};
 
 #[macro_use]
 mod log;
-#[cfg(windows)]
-mod disk_cmds;
-mod images;
+mod console;
 #[cfg(windows)]
 mod windows_cmds;
 
-use images::{hash_path, open_image, open_view, write_hash_list};
+use console::Console;
 use log::LogLevel;
+use volsave_ops::{Reader, find_base, hash_path, open_image, open_view, write_hash_list};
+pub(crate) use volsave_ops::{human, now_unix, tool_name};
 
 /// Set by Ctrl+C; long operations stop at the next block.
 static CANCEL: AtomicBool = AtomicBool::new(false);
@@ -165,20 +165,12 @@ pub(crate) struct WriteOptions {
 }
 
 impl WriteOptions {
-    pub(crate) fn backup_options(&self) -> BackupOptions {
-        let mut options = BackupOptions {
+    pub(crate) fn to_ops(&self) -> volsave_ops::WriteOptions {
+        volsave_ops::WriteOptions {
             zstd_level: self.level,
-            ..BackupOptions::default()
-        };
-        if let Some(threads) = self.threads {
-            options.threads = threads;
+            threads: self.threads,
+            split_bytes: self.split.map(|mib| mib << 20),
         }
-        options
-    }
-
-    pub(crate) fn create_sink(&self, path: &Path) -> Result<SplitWriter> {
-        SplitWriter::create(path, self.split.map(|mib| mib << 20))
-            .with_context(|| format!("cannot create {}", path.display()))
     }
 }
 
@@ -255,17 +247,17 @@ fn run(command: Command) -> Result<()> {
             files_not_to_backup,
             comment,
             all_sectors,
-        } => windows_cmds::backup(windows_cmds::BackupArgs {
+        } => windows_cmds::backup(volsave_ops::BackupRequest {
             source,
             image,
             diff,
             full_if_hash_missing,
             hash,
             no_hash,
-            common,
+            write: common.to_ops(),
             no_vss,
             keep_system_files,
-            files_not_to_backup,
+            files_not_to_backup: files_not_to_backup.into(),
             comment,
             all_sectors,
         }),
@@ -289,7 +281,7 @@ fn run(command: Command) -> Result<()> {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let reader = open_image(path)?;
+    let reader = open_image(path, &mut Console::default())?;
     let header = reader.header();
     let meta = &header.metadata;
     let source = &meta.source;
@@ -298,7 +290,7 @@ fn info(path: &Path) -> Result<()> {
     match header.base_image_id {
         Some(base_id) => {
             println!("Type:         differential");
-            let base = images::find_base(path, header, base_id)
+            let base = find_base(path, header, base_id)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|_| "not found".into());
             println!("Full image:   {base_id} ({base})");
@@ -370,17 +362,17 @@ fn info(path: &Path) -> Result<()> {
 
 /// Checks the image and, for a differential image, also its full image.
 fn verify(path: &Path) -> Result<()> {
-    let reader = open_image(path)?;
+    let reader = open_image(path, &mut Console::default())?;
     let header = reader.header().clone();
     verify_one(path, reader)?;
     if let Some(base_id) = header.base_image_id {
-        let base = images::find_base(path, &header, base_id)?;
-        verify_one(&base, open_image(&base)?)?;
+        let base = find_base(path, &header, base_id)?;
+        verify_one(&base, open_image(&base, &mut Console::default())?)?;
     }
     Ok(())
 }
 
-fn verify_one(path: &Path, mut reader: images::Reader) -> Result<()> {
+fn verify_one(path: &Path, mut reader: Reader) -> Result<()> {
     let total = reader.data_bytes();
     let blocks = reader.blocks().to_vec();
     let mut printer = ProgressPrinter::new("Verifying");
@@ -418,7 +410,7 @@ fn verify_one(path: &Path, mut reader: images::Reader) -> Result<()> {
 }
 
 fn extract(path: &Path, output: &Path, base: Option<&Path>, partition: Option<u32>) -> Result<()> {
-    let image = open_view(path, base)?;
+    let image = open_view(path, base, &mut Console::default())?;
     let mut view = match partition {
         Some(number) => image.into_partition(number)?.0,
         None => image.view,
@@ -439,7 +431,7 @@ fn extract(path: &Path, output: &Path, base: Option<&Path>, partition: Option<u3
 }
 
 fn merge(path: &Path, output: &Path, base: Option<&Path>, common: &WriteOptions) -> Result<()> {
-    let image = open_view(path, base)?;
+    let image = open_view(path, base, &mut Console::default())?;
     anyhow::ensure!(
         image.base_path.is_some(),
         "{} is not a differential image",
@@ -453,9 +445,10 @@ fn merge(path: &Path, output: &Path, base: Option<&Path>, common: &WriteOptions)
         base_image_name: None,
         disk: image.header.metadata.disk.clone(),
     });
-    let writer = ImageWriter::new(common.create_sink(output)?, header)?;
+    let write = common.to_ops();
+    let writer = ImageWriter::new(write.create_sink(output)?, header)?;
     let mut printer = ProgressPrinter::new("Merging");
-    let result = run_merge(image.view, writer, &common.backup_options(), &CANCEL, |p| {
+    let result = run_merge(image.view, writer, &write.backup_options(), &CANCEL, |p| {
         printer.update(p)
     })?;
     printer.finish();
@@ -469,16 +462,6 @@ fn merge(path: &Path, output: &Path, base: Option<&Path>, common: &WriteOptions)
         hashes.display()
     );
     Ok(())
-}
-
-pub(crate) fn tool_name() -> String {
-    format!("VolSave {}", env!("CARGO_PKG_VERSION"))
-}
-
-pub(crate) fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// One status line on stderr, refreshed at most twice per second.
@@ -549,31 +532,11 @@ impl ProgressPrinter {
             eprintln!();
         }
     }
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(crate) fn elapsed(&self) -> Duration {
-        self.started.elapsed()
-    }
 }
 
 fn percent(progress: &Progress) -> f64 {
     match progress.bytes_total {
         0 => 100.0,
         total => progress.bytes_read as f64 * 100.0 / total as f64,
-    }
-}
-
-pub(crate) fn human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.2} {}", UNITS[unit])
     }
 }

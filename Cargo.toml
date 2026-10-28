@@ -12,6 +12,7 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 volsave-core = { path = "crates/volsave-core" }
 volsave-format = { path = "crates/volsave-format" }
+volsave-ops = { path = "crates/volsave-ops" }
 volsave-win = { path = "crates/volsave-win" }
 
 anyhow = "1"

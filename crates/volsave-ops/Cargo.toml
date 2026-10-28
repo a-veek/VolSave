@@ -1,0 +1,20 @@
+[package]
+name = "volsave-ops"
+description = "VolSave operations shared by the command line tool and graphical interfaces"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+uuid.workspace = true
+volsave-core.workspace = true
+volsave-format.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+volsave-win.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

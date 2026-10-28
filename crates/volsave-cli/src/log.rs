@@ -85,7 +85,6 @@ pub(crate) fn say(message: &str) {
 }
 
 /// A status note: stderr and log.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn note(message: &str) {
     eprintln!("{message}");
     write_line("INFO", message);
@@ -132,13 +131,4 @@ pub(crate) fn finish(result: &anyhow::Result<()>) -> ExitCode {
 
 macro_rules! say {
     ($($arg:tt)*) => { $crate::log::say(&format!($($arg)*)) };
-}
-
-#[cfg_attr(not(windows), allow(unused_macros))]
-macro_rules! note {
-    ($($arg:tt)*) => { $crate::log::note(&format!($($arg)*)) };
-}
-
-macro_rules! warn {
-    ($($arg:tt)*) => { $crate::log::warn(&format!($($arg)*)) };
 }

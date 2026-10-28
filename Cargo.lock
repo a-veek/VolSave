@@ -660,6 +660,7 @@ dependencies = [
  "uuid",
  "volsave-core",
  "volsave-format",
+ "volsave-ops",
  "volsave-win",
 ]
 
@@ -686,6 +687,18 @@ dependencies = [
  "thiserror",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "volsave-ops"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "uuid",
+ "volsave-core",
+ "volsave-format",
+ "volsave-win",
 ]
 
 [[package]]

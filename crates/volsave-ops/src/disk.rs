@@ -2,6 +2,7 @@
 //! every partition.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use volsave_core::{
@@ -10,23 +11,22 @@ use volsave_core::{
 };
 use volsave_format::{DiskSummary, PartitionSummary, SourceInfo, SourceKind};
 use volsave_win::{
-    DiskInfo, DiskLayout as WinDiskLayout, RawDevice, SnapshotSet, VolumeInfo, disk_attributes,
-    enable_backup_privileges, excluded_files, list_disks, list_volumes, open_disk_for_writing,
-    refresh_disk, set_disk_attributes, system_file_extents, used_ranges,
+    DiskInfo, DiskLayout as WinDiskLayout, ExclusionMode, RawDevice, SnapshotSet, VolumeInfo,
+    disk_attributes, enable_backup_privileges, excluded_files, list_disks, list_volumes,
+    open_disk_for_writing, refresh_disk, set_disk_attributes, system_file_extents, used_ranges,
 };
 
+use crate::backup::{BackupRequest, ImageJob, load_base, write_image};
 use crate::images::OpenedImage;
-use crate::windows_cmds::{
-    BackupArgs, ImageJob, confirm, load_base, mode, verify_restored, write_image,
-};
-use crate::{CANCEL, ExclusionChoice, ProgressPrinter, human};
+use crate::restore::verify_restored;
+use crate::{Reporter, Stage, human};
 
 /// Unpartitioned areas up to this size are saved, larger ones skipped.
 /// Alignment gaps are 1 MiB; anything a boot loader hides there is small.
 const MAX_SAVED_GAP: u64 = 64 << 20;
 
 /// `HD1`, `disk1`, `PhysicalDrive1` or `\\.\PhysicalDrive1` -> 1.
-pub(crate) fn parse_disk(spec: &str) -> Option<u32> {
+pub fn parse_disk(spec: &str) -> Option<u32> {
     let spec = spec.trim().to_ascii_lowercase();
     let spec = spec.strip_prefix(r"\\.\").unwrap_or(&spec);
     ["hd", "disk", "physicaldrive"]
@@ -35,7 +35,7 @@ pub(crate) fn parse_disk(spec: &str) -> Option<u32> {
         .and_then(|n| n.trim().parse().ok())
 }
 
-pub(crate) fn find_disk(number: u32) -> Result<DiskInfo> {
+pub fn find_disk(number: u32) -> Result<DiskInfo> {
     list_disks()
         .into_iter()
         .find(|d| d.number == number)
@@ -43,7 +43,7 @@ pub(crate) fn find_disk(number: u32) -> Result<DiskInfo> {
 }
 
 /// Volumes with at least one extent on the disk.
-pub(crate) fn volumes_on(number: u32) -> Result<Vec<VolumeInfo>> {
+pub fn volumes_on(number: u32) -> Result<Vec<VolumeInfo>> {
     Ok(list_volumes()?
         .into_iter()
         .filter(|v| v.extents.iter().any(|e| e.disk_number == number))
@@ -67,13 +67,18 @@ enum Method<'a> {
     AllSectors(&'static str),
 }
 
-pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
+pub(crate) fn backup_disk(
+    request: &BackupRequest,
+    number: u32,
+    cancel: &AtomicBool,
+    rep: &mut dyn Reporter,
+) -> Result<()> {
     enable_backup_privileges();
     let disk = find_disk(number)?;
     let device = RawDevice::open_read(&disk.path, disk.sector_size)
         .with_context(|| format!("cannot open {} (run as administrator)", disk.path))?;
     let size = BlockSource::size(&device);
-    let base = load_base(&args)?;
+    let base = load_base(request, rep)?;
     if let Some(base) = &base
         && base.volume_size != size
     {
@@ -91,8 +96,8 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
         disk.sector_size,
     ) {
         Ok(layout) => Some(layout),
-        Err(error) if args.all_sectors => {
-            note!("note: {error}; copying every sector");
+        Err(error) if request.all_sectors => {
+            note!(rep, "note: {error}; copying every sector");
             None
         }
         Err(LayoutError::NoPartitionTable) => {
@@ -101,15 +106,18 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
         Err(error) => bail!("HD{number}: {error}; use --all-sectors to copy it sector by sector"),
     };
     let layout = match layout {
-        Some(layout) if !args.all_sectors => layout,
+        Some(layout) if !request.all_sectors => layout,
         layout => {
             // Sector-by-sector copy: no file systems involved, no snapshot.
             let summary = layout
                 .as_ref()
                 .map(|l| summary(l, &disk, &[], |p| ("all sectors", p.length)));
-            note!("Copying every sector of HD{number}; partitions in use may change while it runs");
+            note!(
+                rep,
+                "Copying every sector of HD{number}; partitions in use may change while it runs"
+            );
             return write_image(
-                &args,
+                request,
                 ImageJob {
                     source: &device,
                     used: RangeSet::full(size),
@@ -118,6 +126,8 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
                     base,
                     name,
                 },
+                cancel,
+                rep,
             );
         }
     };
@@ -151,6 +161,7 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
             (BootSectorKind::BitLocker, v) => {
                 if let Some(v) = v.filter(|v| !v.mount_points.is_empty()) {
                     warn!(
+                        rep,
                         "{} is encrypted with BitLocker and is copied sector by sector without a \
                          snapshot; changes during the backup make the copy inconsistent. Suspend \
                          BitLocker or back up the volume itself for a consistent image",
@@ -159,14 +170,14 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
                 }
                 Method::AllSectors("BitLocker, encrypted sectors")
             }
-            (_, Some(v)) if v.supports_vss() && !args.no_vss => Method::Snapshot(v),
+            (_, Some(v)) if v.supports_vss() && !request.no_vss => Method::Snapshot(v),
             (_, Some(v)) if !v.filesystem.is_empty() && v.filesystem != "RAW" => Method::Live(v),
             (_, _) => Method::AllSectors("no file system known to Windows"),
         };
         methods.push(method);
     }
 
-    let snapshot = create_snapshot(&mut methods, number)?;
+    let snapshot = create_snapshot(&mut methods, number, rep)?;
 
     // Open every snapshot first; the mapped source borrows them.
     let mut snapshot_devices = Vec::new();
@@ -203,7 +214,7 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
                     .expect("opened above");
                 let shot_size = BlockSource::size(shot).min(p.length);
                 let (part, clusters_end) =
-                    volume_ranges(&args, volume, shot.file(), shot_size, root);
+                    volume_ranges(request, volume, shot.file(), shot_size, root, rep);
                 // The tail after the last cluster (NTFS backup boot sector)
                 // may be hidden by the snapshot; it is read from the disk.
                 source.map(p.offset..p.offset + clusters_end, shot);
@@ -223,6 +234,7 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
                     Ok(allocation) => allocation.used,
                     Err(error) => {
                         warn!(
+                            rep,
                             "cannot read the allocation of {} ({error}); saving every sector",
                             volume.display_name()
                         );
@@ -254,9 +266,10 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
         };
         (method, selected[i])
     });
-    print_plan(&summary);
+    print_plan(&summary, rep);
     if skipped_gaps > 0 {
         note!(
+            rep,
             "Unpartitioned space not saved: {} (only gaps up to {} are kept)",
             human(skipped_gaps),
             human(MAX_SAVED_GAP)
@@ -264,7 +277,7 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
     }
 
     write_image(
-        &args,
+        request,
         ImageJob {
             source: &source,
             used,
@@ -273,6 +286,8 @@ pub(crate) fn backup_disk(args: BackupArgs, number: u32) -> Result<()> {
             base,
             name,
         },
+        cancel,
+        rep,
     )?;
     if let Some(set) = snapshot {
         set.complete()?;
@@ -289,7 +304,11 @@ const SMALL_SYSTEM_VOLUME: u64 = 2 << 30;
 /// VSS needs free space on each volume, which small, nearly full system
 /// partitions often lack. If the snapshot fails, those are read sector by
 /// sector instead (Windows hardly writes to them) and the rest is retried.
-fn create_snapshot(methods: &mut [Method<'_>], number: u32) -> Result<Option<SnapshotSet>> {
+fn create_snapshot(
+    methods: &mut [Method<'_>],
+    number: u32,
+    rep: &mut dyn Reporter,
+) -> Result<Option<SnapshotSet>> {
     let volumes = |methods: &[Method<'_>]| -> Vec<String> {
         methods
             .iter()
@@ -299,23 +318,24 @@ fn create_snapshot(methods: &mut [Method<'_>], number: u32) -> Result<Option<Sna
             })
             .collect()
     };
-    let create = |guids: &[String]| -> Result<Option<SnapshotSet>> {
+    let create = |guids: &[String], rep: &mut dyn Reporter| -> Result<Option<SnapshotSet>> {
         if guids.is_empty() {
             return Ok(None);
         }
         note!(
+            rep,
             "Creating VSS snapshot of {} volume(s) on HD{number} ...",
             guids.len()
         );
         let paths: Vec<&str> = guids.iter().map(String::as_str).collect();
         let set = SnapshotSet::create(&paths)?;
         for warning in set.warnings() {
-            warn!("{warning}");
+            warn!(rep, "{warning}");
         }
         Ok(Some(set))
     };
 
-    let error = match create(&volumes(methods)) {
+    let error = match create(&volumes(methods), rep) {
         Ok(set) => return Ok(set),
         Err(error) => error,
     };
@@ -333,36 +353,39 @@ fn create_snapshot(methods: &mut [Method<'_>], number: u32) -> Result<Option<Sna
         return Err(error);
     }
     warn!(
+        rep,
         "VSS snapshot failed ({error:#}); copying the small volumes without drive letter sector by sector and retrying"
     );
-    create(&volumes(methods))
+    create(&volumes(methods), rep)
 }
 
 /// Used ranges of a snapshotted volume minus the files that are not saved,
 /// and the end of its last cluster.
 fn volume_ranges(
-    args: &BackupArgs,
+    request: &BackupRequest,
     volume: &VolumeInfo,
     file: &std::fs::File,
     size: u64,
     root: &str,
+    rep: &mut dyn Reporter,
 ) -> (RangeSet, u64) {
     let (mut used, clusters_end) =
         match used_ranges(file, size, volume.cluster_size, volume.sector_size) {
             Ok(allocation) => (allocation.used, allocation.clusters_end),
             Err(error) => {
                 warn!(
+                    rep,
                     "cannot read the allocation bitmap of {} ({error}); saving every sector",
                     volume.display_name()
                 );
                 (RangeSet::full(size), size)
             }
         };
-    if !args.keep_system_files {
+    if !request.keep_system_files {
         used = used.subtract(&system_file_extents(root, volume.cluster_size));
     }
-    if args.files_not_to_backup != ExclusionChoice::None {
-        let (excluded, _) = excluded_files(root, volume, mode(args.files_not_to_backup));
+    if request.files_not_to_backup != ExclusionMode::None {
+        let (excluded, _) = excluded_files(root, volume, request.files_not_to_backup);
         used = used.subtract(&excluded);
     }
     (used, clusters_end)
@@ -415,7 +438,8 @@ fn summary(
     }
 }
 
-pub(crate) fn print_plan(summary: &DiskSummary) {
+/// Reports how each partition of a disk image is (or was) saved.
+pub fn print_plan(summary: &DiskSummary, rep: &mut dyn Reporter) {
     for p in &summary.partitions {
         let name = p
             .mount_points
@@ -424,6 +448,7 @@ pub(crate) fn print_plan(summary: &DiskSummary) {
             .or_else(|| p.label.clone())
             .unwrap_or_default();
         note!(
+            rep,
             "  #{:<2} {:>11} {:<20} {:<6} {:<10} {}: {}",
             p.number,
             human(p.length),
@@ -436,18 +461,14 @@ pub(crate) fn print_plan(summary: &DiskSummary) {
     }
 }
 
-/// Restores a disk image onto a whole disk.
-///
-/// The volumes on the target are locked and dismounted for the whole run,
-/// which is what Windows requires for raw writes inside them. The partition
-/// data is written first and the partition table last.
-pub(crate) fn restore_disk(
+/// Checks that a disk image fits onto disk `number` and reports what would
+/// be overwritten.
+pub(crate) fn plan_disk_restore(
     mut opened: OpenedImage,
     number: u32,
     image_files: &[PathBuf],
-    yes: bool,
-    verify: bool,
-) -> Result<()> {
+    rep: &mut dyn Reporter,
+) -> Result<DiskRestore> {
     let disk = find_disk(number)?;
     let layout = opened.layout()?;
     let source = opened.header.metadata.source.clone();
@@ -504,6 +525,7 @@ pub(crate) fn restore_disk(
     }
 
     say!(
+        rep,
         "Image:  disk {} {}, {}, {}",
         format!("{:?}", layout.style).to_uppercase(),
         layout.disk_id(),
@@ -511,13 +533,14 @@ pub(crate) fn restore_disk(
         source.hostname.as_deref().unwrap_or("unknown computer")
     );
     if let Some(base) = &opened.base_path {
-        say!("        differential, full image {}", base.display());
+        say!(rep, "        differential, full image {}", base.display());
     }
     match &opened.header.metadata.disk {
-        Some(summary) => print_plan(summary),
+        Some(summary) => print_plan(summary, rep),
         None => {
             for p in &layout.partitions {
                 say!(
+                    rep,
                     "  #{:<2} {:>11} {}",
                     p.number,
                     human(p.length),
@@ -527,6 +550,7 @@ pub(crate) fn restore_disk(
         }
     }
     say!(
+        rep,
         "Target: HD{number} {}, {}",
         human(disk.size),
         if disk.model.is_empty() {
@@ -537,6 +561,7 @@ pub(crate) fn restore_disk(
     );
     for volume in &volumes {
         say!(
+            rep,
             "        {} {} \"{}\" ({}) will be overwritten",
             volume.display_name(),
             volume.filesystem,
@@ -546,98 +571,133 @@ pub(crate) fn restore_disk(
     }
     if disk.size > source.size_bytes {
         note!(
+            rep,
             "note: the target is {} larger; that space stays unallocated",
             human(disk.size - source.size_bytes)
         );
     } else if disk.size < source.size_bytes {
         note!(
+            rep,
             "note: the target is {} smaller; all partitions still fit",
             human(source.size_bytes - disk.size)
         );
     }
-    if !yes
-        && !confirm(&format!(
-            "All data on HD{number} ({}) will be overwritten. Type YES to continue: ",
-            human(disk.size)
-        ))?
-    {
-        bail!("restore cancelled");
+    Ok(DiskRestore {
+        opened,
+        disk,
+        layout,
+        volumes,
+    })
+}
+
+/// Restore of a disk image onto a whole disk.
+pub struct DiskRestore {
+    opened: OpenedImage,
+    disk: DiskInfo,
+    layout: DiskLayout,
+    volumes: Vec<VolumeInfo>,
+}
+
+impl DiskRestore {
+    pub(crate) fn target_name(&self) -> String {
+        format!("HD{} ({})", self.disk.number, human(self.disk.size))
     }
 
-    let control = open_disk_for_writing(number)
-        .with_context(|| format!("cannot open HD{number} (run as administrator)"))?;
-    let (offline, read_only) = disk_attributes(&control).unwrap_or((false, false));
-    if read_only {
-        set_disk_attributes(&control, offline, false, false)
-            .with_context(|| format!("HD{number} is read-only and cannot be made writable"))?;
-        note!("HD{number} was read-only; made it writable for this restore");
-    }
-    // Handles stay open until the end; closing one would let Windows mount
-    // the volume again.
-    let mut locked = Vec::new();
-    for volume in &volumes {
-        let device = RawDevice::open_write(&volume.device_path(), volume.sector_size)
-            .with_context(|| format!("cannot open {}", volume.display_name()))?;
-        device.lock_and_dismount().with_context(|| {
+    /// The volumes on the target are locked and dismounted for the whole
+    /// run, which is what Windows requires for raw writes inside them. The
+    /// partition data is written first and the partition table last.
+    pub(crate) fn run(
+        mut self,
+        verify: bool,
+        cancel: &AtomicBool,
+        rep: &mut dyn Reporter,
+    ) -> Result<()> {
+        let (disk, layout) = (&self.disk, &self.layout);
+        let number = disk.number;
+        let control = open_disk_for_writing(number)
+            .with_context(|| format!("cannot open HD{number} (run as administrator)"))?;
+        let (offline, read_only) = disk_attributes(&control).unwrap_or((false, false));
+        if read_only {
+            set_disk_attributes(&control, offline, false, false)
+                .with_context(|| format!("HD{number} is read-only and cannot be made writable"))?;
+            note!(
+                rep,
+                "HD{number} was read-only; made it writable for this restore"
+            );
+        }
+        // Handles stay open until the end; closing one would let Windows mount
+        // the volume again.
+        let mut locked = Vec::new();
+        for volume in &self.volumes {
+            let device = RawDevice::open_write(&volume.device_path(), volume.sector_size)
+                .with_context(|| format!("cannot open {}", volume.display_name()))?;
+            device.lock_and_dismount().with_context(|| {
+                format!(
+                    "{} is in use; close all programs and windows using it",
+                    volume.display_name()
+                )
+            })?;
+            locked.push(device);
+        }
+        let mut target = RawDevice::open_write(&disk.path, disk.sector_size)
+            .with_context(|| format!("cannot open {} for writing", disk.path))?;
+
+        let view = self.opened.view.as_mut();
+        let result = restore_disk_data(view, &mut target, layout, cancel, |p| {
+            rep.progress(Stage::Restore, p)
+        });
+        rep.stage_done(Stage::Restore);
+        if let Ok(stats) = &result {
+            say!(rep, "Done: {} written", human(stats.bytes_written));
+        }
+        // While the volumes are still locked, before Windows sees the new table.
+        let verified = match &result {
+            Ok(stats) if verify => verify_restored(view, &target, &stats.copied, cancel, rep),
+            _ => Ok(()),
+        };
+        drop(target);
+        drop(locked);
+        if let Err(error) = refresh_disk(&control) {
+            warn!(
+                rep,
+                "Windows could not re-read the partition table of HD{number} ({error}); restart before using the disk"
+            );
+        }
+        result.with_context(|| {
             format!(
-                "{} is in use; close all programs and windows using it",
-                volume.display_name()
+                "restore of HD{number} failed; the disk is incomplete and must be restored again"
             )
         })?;
-        locked.push(device);
-    }
-    let mut target = RawDevice::open_write(&disk.path, disk.sector_size)
-        .with_context(|| format!("cannot open {} for writing", disk.path))?;
+        verified
+            .with_context(|| format!("HD{number} does not match the image; restore it again"))?;
 
-    let mut printer = ProgressPrinter::new("Restore");
-    let result = restore_disk_data(opened.view.as_mut(), &mut target, &layout, &CANCEL, |p| {
-        printer.update(p)
-    });
-    printer.finish();
-    if let Ok(stats) = &result {
-        say!("Done: {} written", human(stats.bytes_written));
+        // A second disk with the same ID makes Windows keep this one offline;
+        // bringing it online would give it a new ID and break its boot entries.
+        let disk_id = layout.disk_id().to_ascii_lowercase();
+        let twin = list_disks().into_iter().find(|d| {
+            d.number != number
+                && d.layout.as_ref().is_some_and(|l| match l {
+                    WinDiskLayout::Mbr { signature, .. } => format!("{signature:08x}") == disk_id,
+                    WinDiskLayout::Gpt { disk_id: id, .. } => format!("{{{id}}}") == disk_id,
+                    WinDiskLayout::Raw => false,
+                })
+        });
+        match twin {
+            Some(twin) => say!(
+                rep,
+                "note: HD{} has the same disk ID {}; Windows keeps HD{number} offline. Do NOT set it online \
+                 here, that would change its ID and it would no longer start. Shut down, remove HD{} \
+                 and start from HD{number}.",
+                twin.number,
+                layout.disk_id(),
+                twin.number
+            ),
+            None if offline => say!(
+                rep,
+                "note: HD{number} was offline before and stays offline; set it online in Disk Management to use it"
+            ),
+            None => say!(rep, "HD{number} now has the partitions of the image"),
+        }
+        Ok(())
     }
-    // While the volumes are still locked, before Windows sees the new table.
-    let verified = match &result {
-        Ok(stats) if verify => verify_restored(opened.view.as_mut(), &target, &stats.copied),
-        _ => Ok(()),
-    };
-    drop(target);
-    drop(locked);
-    if let Err(error) = refresh_disk(&control) {
-        warn!(
-            "Windows could not re-read the partition table of HD{number} ({error}); restart before using the disk"
-        );
-    }
-    result.with_context(|| {
-        format!("restore of HD{number} failed; the disk is incomplete and must be restored again")
-    })?;
-    verified.with_context(|| format!("HD{number} does not match the image; restore it again"))?;
-
-    // A second disk with the same ID makes Windows keep this one offline;
-    // bringing it online would give it a new ID and break its boot entries.
-    let disk_id = layout.disk_id().to_ascii_lowercase();
-    let twin = list_disks().into_iter().find(|d| {
-        d.number != number
-            && d.layout.as_ref().is_some_and(|l| match l {
-                WinDiskLayout::Mbr { signature, .. } => format!("{signature:08x}") == disk_id,
-                WinDiskLayout::Gpt { disk_id: id, .. } => format!("{{{id}}}") == disk_id,
-                WinDiskLayout::Raw => false,
-            })
-    });
-    match twin {
-        Some(twin) => say!(
-            "note: HD{} has the same disk ID {}; Windows keeps HD{number} offline. Do NOT set it online \
-             here, that would change its ID and it would no longer start. Shut down, remove HD{} \
-             and start from HD{number}.",
-            twin.number,
-            layout.disk_id(),
-            twin.number
-        ),
-        None if offline => say!(
-            "note: HD{number} was offline before and stays offline; set it online in Disk Management to use it"
-        ),
-        None => say!("HD{number} now has the partitions of the image"),
-    }
-    Ok(())
 }

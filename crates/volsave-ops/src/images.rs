@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use crate::Reporter;
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 use volsave_core::{DiskLayout, ImageView, LayeredImage, Partition, PartitionView, SingleImage};
@@ -12,15 +13,16 @@ use volsave_format::{
     SplitReader,
 };
 
-pub(crate) type Reader = ImageReader<SplitReader>;
+pub type Reader = ImageReader<SplitReader>;
 
-pub(crate) fn open_image(path: &Path) -> Result<Reader> {
+pub fn open_image(path: &Path, rep: &mut dyn Reporter) -> Result<Reader> {
     let source =
         SplitReader::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let reader = ImageReader::open(source)
         .with_context(|| format!("{} is not a valid image", path.display()))?;
     if reader.index_rebuilt() {
         warn!(
+            rep,
             "the index of {} was missing and has been rebuilt; the image may be incomplete",
             path.display()
         );
@@ -30,7 +32,7 @@ pub(crate) fn open_image(path: &Path) -> Result<Reader> {
 
 /// An image ready for restoring: a full image, or a differential image
 /// layered on top of its full image.
-pub(crate) struct OpenedImage {
+pub struct OpenedImage {
     pub view: Box<dyn ImageView>,
     pub header: FileHeader,
     /// Path of the full image, for differential images.
@@ -38,12 +40,12 @@ pub(crate) struct OpenedImage {
 }
 
 impl OpenedImage {
-    pub(crate) fn is_disk(&self) -> bool {
+    pub fn is_disk(&self) -> bool {
         self.header.metadata.source.kind == SourceKind::Disk
     }
 
     /// The partition table stored in a disk image.
-    pub(crate) fn layout(&mut self) -> Result<DiskLayout> {
+    pub fn layout(&mut self) -> Result<DiskLayout> {
         let size = self.view.source_size();
         let sector_size = self.header.metadata.source.sector_size.max(512);
         let view = &mut self.view;
@@ -56,7 +58,7 @@ impl OpenedImage {
     }
 
     /// Narrows a disk image to one of its partitions.
-    pub(crate) fn into_partition(mut self, number: u32) -> Result<(Box<dyn ImageView>, Partition)> {
+    pub fn into_partition(mut self, number: u32) -> Result<(Box<dyn ImageView>, Partition)> {
         anyhow::ensure!(self.is_disk(), "--partition needs a disk image");
         let layout = self.layout()?;
         let partition = layout
@@ -69,8 +71,8 @@ impl OpenedImage {
     }
 }
 
-pub(crate) fn open_view(path: &Path, base: Option<&Path>) -> Result<OpenedImage> {
-    let reader = open_image(path)?;
+pub fn open_view(path: &Path, base: Option<&Path>, rep: &mut dyn Reporter) -> Result<OpenedImage> {
+    let reader = open_image(path, rep)?;
     let header = reader.header().clone();
     let Some(base_id) = header.base_image_id else {
         return Ok(OpenedImage {
@@ -83,7 +85,7 @@ pub(crate) fn open_view(path: &Path, base: Option<&Path>) -> Result<OpenedImage>
         Some(base) => base.to_path_buf(),
         None => find_base(path, &header, base_id)?,
     };
-    let base_reader = open_image(&base_path)?;
+    let base_reader = open_image(&base_path, rep)?;
     let layered = LayeredImage::new(base_reader, reader).with_context(|| {
         format!(
             "cannot combine {} with {}",
@@ -100,7 +102,7 @@ pub(crate) fn open_view(path: &Path, base: Option<&Path>) -> Result<OpenedImage>
 
 /// Looks for the full image of a differential image: first under the name
 /// stored in the image, then among all images in the same folder.
-pub(crate) fn find_base(diff: &Path, header: &FileHeader, base_id: Uuid) -> Result<PathBuf> {
+pub fn find_base(diff: &Path, header: &FileHeader, base_id: Uuid) -> Result<PathBuf> {
     let folder = diff
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -136,12 +138,11 @@ pub(crate) fn find_base(diff: &Path, header: &FileHeader, base_id: Uuid) -> Resu
 }
 
 /// Default hash list path for an image: the image path with the hash list extension.
-pub(crate) fn hash_path(image: &Path) -> PathBuf {
+pub fn hash_path(image: &Path) -> PathBuf {
     image.with_extension(HASH_LIST_EXTENSION)
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn read_hash_list(path: &Path) -> Result<HashList> {
+pub fn read_hash_list(path: &Path) -> Result<HashList> {
     let file =
         File::open(path).with_context(|| format!("cannot open hash list {}", path.display()))?;
     HashList::read_from(BufReader::new(file))
@@ -149,7 +150,7 @@ pub(crate) fn read_hash_list(path: &Path) -> Result<HashList> {
 }
 
 /// Writes via a temporary file so an existing list is only replaced by a complete one.
-pub(crate) fn write_hash_list(path: &Path, list: &HashList) -> Result<()> {
+pub fn write_hash_list(path: &Path, list: &HashList) -> Result<()> {
     let temp = path.with_extension(format!("{HASH_LIST_EXTENSION}.tmp"));
     let mut file = BufWriter::new(
         File::create(&temp).with_context(|| format!("cannot create {}", temp.display()))?,
@@ -215,7 +216,7 @@ mod tests {
             ImageWriter::new(SplitWriter::create(&diff_path, None).unwrap(), header).unwrap();
         writer.finish().unwrap().finish().unwrap();
 
-        let opened = open_view(&diff_path, None).unwrap();
+        let opened = open_view(&diff_path, None, &mut crate::Silent).unwrap();
         assert_eq!(opened.base_path.as_deref(), Some(full_path.as_path()));
     }
 

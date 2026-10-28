@@ -18,6 +18,7 @@ clap.workspace = true
 ctrlc.workspace = true
 volsave-core.workspace = true
 volsave-format.workspace = true
+volsave-ops.workspace = true
 volsave-win.workspace = true
 uuid.workspace = true
 
