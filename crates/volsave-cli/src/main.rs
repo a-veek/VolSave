@@ -62,7 +62,8 @@ enum Command {
         /// With --diff: make a full backup if the hash list does not exist
         #[arg(long, requires = "diff")]
         full_if_hash_missing: bool,
-        /// Where to write the hash list (default for full images: IMAGE with .dhsh extension)
+        /// Full backups: where to write the hash list (default: IMAGE with .dhsh
+        /// extension). Differential images get no hash list of their own
         #[arg(long, value_name = "FILE", conflicts_with = "no_hash")]
         hash: Option<PathBuf>,
         /// Do not write a hash list

@@ -227,6 +227,14 @@ pub(crate) fn load_base(
         );
         return Ok(None);
     }
+    // A list of a differential image would let the next backup build on it,
+    // and such a chain cannot be restored: every --diff compares with the
+    // full image.
+    if request.hash.is_some() {
+        bail!(
+            "--hash is only for full backups; a differential image always builds on the hash list of its full image"
+        );
+    }
     read_hash_list(path).map(Some)
 }
 
@@ -314,13 +322,13 @@ pub(crate) fn write_image(
         }
     };
 
-    // A differential backup keeps the full image's hash list; its own list
-    // is only written on request. A full backup made because the --diff list
-    // was missing writes its list there, so the next run finds it.
+    // A differential backup keeps the full image's hash list and gets none of
+    // its own. A full backup made because the --diff list was missing writes
+    // its list there, so the next run finds it.
     let hash_file = match (&request.hash, &base, &request.diff) {
         _ if request.no_hash => None,
-        (Some(path), _, _) => Some(path.clone()),
-        (None, Some(_), _) => None,
+        (_, Some(_), _) => None,
+        (Some(path), None, _) => Some(path.clone()),
         (None, None, Some(diff_list)) => Some(diff_list.clone()),
         (None, None, None) => Some(hash_path(&request.image)),
     };
