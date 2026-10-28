@@ -26,7 +26,7 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 #[derive(Parser)]
 #[command(
     name = "volsave",
-    version,
+    version = volsave_ops::VERSION,
     about = "Disk and volume imaging for Windows"
 )]
 struct Cli {

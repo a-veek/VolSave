@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "volsave-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "volsave-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "crossbeam-channel",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "volsave-format"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "volsave-ops"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "tempfile",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "volsave-win"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "thiserror",
  "volsave-core",

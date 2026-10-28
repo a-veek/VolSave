@@ -23,7 +23,7 @@ pub use images::{
     write_hash_list,
 };
 pub use report::{Level, Reporter, Silent, Stage};
-pub use util::{WriteOptions, human, now_unix, tool_name};
+pub use util::{VERSION, WriteOptions, human, now_unix, tool_name};
 
 #[cfg(windows)]
 pub use backup::{BackupRequest, backup};

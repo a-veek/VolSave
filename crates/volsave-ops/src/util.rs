@@ -5,9 +5,12 @@ use anyhow::{Context, Result};
 use volsave_core::BackupOptions;
 use volsave_format::{DEFAULT_ZSTD_LEVEL, SplitWriter};
 
+/// Version with the git commit it was built from, e.g. `0.2.0 (137c403)`.
+pub const VERSION: &str = env!("VOLSAVE_VERSION");
+
 /// Name and version written into images and logs.
 pub fn tool_name() -> String {
-    format!("VolSave {}", env!("CARGO_PKG_VERSION"))
+    format!("VolSave {VERSION}")
 }
 
 pub fn now_unix() -> u64 {
