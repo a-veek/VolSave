@@ -46,6 +46,9 @@ pub struct BackupRequest {
     /// Disks only: copy unlocked BitLocker volumes as encrypted sectors
     /// instead of decrypted through a VSS snapshot.
     pub bitlocker_raw: bool,
+    /// Added to the warning when a BitLocker volume is saved decrypted,
+    /// e.g. where encrypted images are available.
+    pub decrypted_hint: Option<String>,
 }
 
 impl BackupRequest {
@@ -65,6 +68,7 @@ impl BackupRequest {
             comment: None,
             all_sectors: false,
             bitlocker_raw: false,
+            decrypted_hint: None,
         }
     }
 }
@@ -117,7 +121,7 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         warn!(
             rep,
             "{}",
-            crate::disk::decrypted_warning(volume.display_name())
+            crate::disk::decrypted_warning(volume.display_name(), request)
         );
     }
     let use_vss = !request.no_vss && volume.supports_vss();

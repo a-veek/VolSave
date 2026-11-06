@@ -16,6 +16,10 @@ mod console;
 mod windows_cmds;
 
 use console::Console;
+
+/// Shown when a BitLocker volume is saved decrypted.
+#[cfg(windows)]
+const PRO_ENCRYPTION_HINT: &str = "VolSave Pro can save encrypted images";
 use log::LogLevel;
 use volsave_ops::{Reader, find_base, hash_path, open_image, open_view, write_hash_list};
 pub(crate) use volsave_ops::{human, now_unix, tool_name};
@@ -267,6 +271,7 @@ fn run(command: Command) -> Result<()> {
             comment,
             all_sectors,
             bitlocker_raw,
+            decrypted_hint: Some(PRO_ENCRYPTION_HINT.into()),
         }),
         #[cfg(windows)]
         Command::Restore {

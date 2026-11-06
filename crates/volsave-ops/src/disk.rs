@@ -186,7 +186,7 @@ pub(crate) fn backup_disk(
             _ => Method::AllSectors("no file system known to Windows"),
         };
         if decrypt && let Some(v) = volume {
-            warn!(rep, "{}", decrypted_warning(v.display_name()));
+            warn!(rep, "{}", decrypted_warning(v.display_name(), request));
         }
         methods.push(method);
         decrypted.push(decrypt);
@@ -382,12 +382,16 @@ pub(crate) fn is_bitlocker(volume: &VolumeInfo) -> bool {
 }
 
 /// Warning for a BitLocker volume that is saved decrypted.
-pub(crate) fn decrypted_warning(name: &str) -> String {
-    format!(
+pub(crate) fn decrypted_warning(name: &str, request: &BackupRequest) -> String {
+    let warning = format!(
         "{name} is encrypted with BitLocker and is saved DECRYPTED: anyone with access to the \
          image can read its data, so keep the image in a safe place. A restored copy is not \
          encrypted; turn BitLocker on again afterwards"
-    )
+    );
+    match &request.decrypted_hint {
+        Some(hint) => format!("{warning}. {hint}"),
+        None => warning,
+    }
 }
 
 /// Volumes up to this size without a drive letter (System Reserved,
