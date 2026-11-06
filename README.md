@@ -3,10 +3,14 @@
 Disk and volume imaging for Windows, written in Rust. Backups use the
 Volume Shadow Copy Service (VSS); images are compressed with zstd.
 
-Status: early development. The command line tool backs up, verifies,
-restores and merges single volumes and whole disks (partition table, boot
-code and all partitions); a whole-disk clone of Windows 10 has been restored
-and booted. The GUI is not started yet.
+Status: early development, but in use. The command line tool backs up,
+verifies, restores and merges single volumes and whole disks (partition
+table, boot code and all partitions). Whole-disk clones of Windows 10 and 11
+(BIOS/MBR and UEFI/GPT) have been restored and booted, in virtual machines
+and on real hardware, also from Windows PE.
+
+Download: `volsave.exe` under [Releases](../../releases); it runs on Windows
+10/11 and in Windows PE, without installation.
 
 ## Layout
 
@@ -18,8 +22,9 @@ and booted. The GUI is not started yet.
 | `crates/volsave-ops` | Operations shared by the command line tool and GUIs: backup, restore, opening images |
 | `crates/volsave-cli` | Command line tool `volsave` |
 
-Network targets (SMB, FTP, SFTP), encryption and a graphical interface are part of
-the separate commercial product VolSave Pro, which builds on these crates.
+A graphical interface is part of the separate commercial product VolSave
+Pro, which builds on these crates; encrypted images and network targets
+(SMB, FTP, SFTP) are planned there.
 
 ## Building
 
@@ -40,6 +45,7 @@ volsave restore E:\backup\c-mon.dimg F:            # finds c.dimg by its id
 volsave merge E:\backup\c-mon.dimg E:\backup\c-new.dimg
 
 volsave backup HD0 E:\backup\disk0.dimg            # whole disk 0
+volsave backup HD0 E:\backup\disk0.dimg --all-sectors  # every sector (unknown layouts)
 volsave info E:\backup\disk0.dimg                  # shows the partitions
 volsave restore E:\backup\disk0.dimg HD1 --verify  # clone onto disk 1, read back
 volsave restore E:\backup\disk0.dimg F: --partition 2
@@ -49,6 +55,11 @@ A restored disk keeps the disk ID of the original. While both disks are
 attached Windows keeps the clone offline; do not set it online there, or
 Windows gives it a new ID and it no longer starts. Remove the original disk
 and boot from the clone.
+
+Differential images (`--diff`) store only what changed since a full backup
+and build on its hash list; there are no incremental chains. In Windows PE
+volumes are read directly without VSS: the installed Windows is not running.
+`restore --verify` reads the target back and compares it with the image.
 
 BitLocker volumes that are unlocked (always the case for the running
 Windows) are saved decrypted through a VSS snapshot: only used blocks,
@@ -70,5 +81,5 @@ The `zstd` crate compiles the zstd C library, so a C compiler is required
 
 The command line tool and the libraries in this repository are free
 software under the GNU General Public License, version 3 or later
-([LICENSE](LICENSE)). The planned graphical interface will be a separate,
+([LICENSE](LICENSE)). The graphical interface VolSave Pro is a separate,
 commercial product.
