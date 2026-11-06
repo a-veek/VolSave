@@ -43,6 +43,9 @@ pub struct BackupRequest {
     pub comment: Option<String>,
     /// Disks only: copy every sector instead of the used blocks.
     pub all_sectors: bool,
+    /// Disks only: copy unlocked BitLocker volumes as encrypted sectors
+    /// instead of decrypted through a VSS snapshot.
+    pub bitlocker_raw: bool,
 }
 
 impl BackupRequest {
@@ -61,6 +64,7 @@ impl BackupRequest {
             files_not_to_backup: ExclusionMode::Safe,
             comment: None,
             all_sectors: false,
+            bitlocker_raw: false,
         }
     }
 }
@@ -105,6 +109,17 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         );
     }
 
+    anyhow::ensure!(
+        !request.bitlocker_raw,
+        "--bitlocker-raw is for disks (HD0, HD1, ...); a volume is always read decrypted"
+    );
+    if crate::disk::is_bitlocker(&volume) {
+        warn!(
+            rep,
+            "{}",
+            crate::disk::decrypted_warning(volume.display_name())
+        );
+    }
     let use_vss = !request.no_vss && volume.supports_vss();
     if !request.no_vss && !use_vss {
         note!(

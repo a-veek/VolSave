@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use anyhow::{Context, Result, bail};
 use volsave_core::{
     AlignedBuf, BlockSource, BootSectorKind, DiskLayout, LayoutError, MappedSource, Partition,
-    RangeSet, identify_boot_sector, restore_disk as restore_disk_data,
+    PatchedSource, RangeSet, identify_boot_sector, restore_disk as restore_disk_data,
 };
 use volsave_format::{DiskSummary, PartitionSummary, SourceInfo, SourceKind};
 use volsave_win::{
@@ -149,35 +149,54 @@ pub(crate) fn backup_disk(
 
     // Decide per partition how to read it.
     let mut methods = Vec::new();
+    // Per partition: an unlocked BitLocker volume, saved decrypted.
+    let mut decrypted = Vec::new();
     for p in &layout.partitions {
         let mut first = AlignedBuf::zeroed(disk.sector_size as usize);
         device
             .read_at(p.offset, &mut first)
             .with_context(|| format!("cannot read partition {}", p.number))?;
         let volume = volume_of(&volumes, number, p);
-        let method = match (identify_boot_sector(&first), volume) {
-            // Through its volume the data would come out decrypted and no
-            // longer match the BitLocker metadata on the disk.
-            (BootSectorKind::BitLocker, v) => {
-                if let Some(v) = v.filter(|v| !v.mount_points.is_empty()) {
-                    warn!(
+        let bitlocker = identify_boot_sector(&first) == BootSectorKind::BitLocker;
+        // A locked BitLocker volume shows no file system.
+        let unlocked = volume.filter(|v| v.supports_vss());
+        let decrypt = bitlocker && unlocked.is_some() && !request.bitlocker_raw;
+        let method = match volume {
+            _ if bitlocker && !decrypt => {
+                match unlocked {
+                    Some(v) => warn!(
                         rep,
-                        "{} is encrypted with BitLocker and is copied sector by sector without a \
-                         snapshot; changes during the backup make the copy inconsistent. Suspend \
-                         BitLocker or back up the volume itself for a consistent image",
+                        "{} is encrypted with BitLocker and copied sector by sector as encrypted \
+                         data (--bitlocker-raw): every sector, hardly compressible and without a \
+                         snapshot, so changes during the backup make the copy inconsistent",
                         v.display_name()
-                    );
+                    ),
+                    None => note!(
+                        rep,
+                        "note: partition {} is locked by BitLocker and is copied sector by sector \
+                         as encrypted data. Unlocking it first (manage-bde -unlock) makes the \
+                         image much smaller",
+                        p.number
+                    ),
                 }
                 Method::AllSectors("BitLocker, encrypted sectors")
             }
-            (_, Some(v)) if v.supports_vss() && !request.no_vss => Method::Snapshot(v),
-            (_, Some(v)) if !v.filesystem.is_empty() && v.filesystem != "RAW" => Method::Live(v),
-            (_, _) => Method::AllSectors("no file system known to Windows"),
+            Some(v) if v.supports_vss() && !request.no_vss => Method::Snapshot(v),
+            Some(v) if !v.filesystem.is_empty() && v.filesystem != "RAW" => Method::Live(v),
+            _ => Method::AllSectors("no file system known to Windows"),
         };
+        if decrypt && let Some(v) = volume {
+            warn!(rep, "{}", decrypted_warning(v.display_name()));
+        }
         methods.push(method);
+        decrypted.push(decrypt);
     }
 
     let snapshot = create_snapshot(&mut methods, number, rep)?;
+    // A failed snapshot may have turned a volume into an encrypted sector copy.
+    for (decrypt, method) in decrypted.iter_mut().zip(&methods) {
+        *decrypt &= !matches!(method, Method::AllSectors(_));
+    }
 
     // Open every snapshot first; the mapped source borrows them.
     let mut snapshot_devices = Vec::new();
@@ -194,6 +213,87 @@ pub(crate) fn backup_disk(
             snapshot_devices.push((p.number, device, shot.root()));
         }
     }
+    // Decrypted BitLocker volumes are read through their volume device; on
+    // the disk their sectors are encrypted.
+    let mut volume_devices = Vec::new();
+    for ((p, method), decrypt) in layout.partitions.iter().zip(&methods).zip(&decrypted) {
+        if *decrypt && let Method::Snapshot(v) | Method::Live(v) = method {
+            let device = RawDevice::open_read(&v.device_path(), v.sector_size)
+                .with_context(|| format!("cannot open {}", v.display_name()))?;
+            volume_devices.push((p.number, device));
+        }
+    }
+    let volume_device = |n: u32| volume_devices.iter().find(|(m, _)| *m == n).map(|(_, d)| d);
+    let snapshot_device = |n: u32| {
+        snapshot_devices
+            .iter()
+            .find(|(m, _, _)| *m == n)
+            .map(|(_, d, root)| (d, root.as_str()))
+            .expect("opened above")
+    };
+
+    // Per partition: the bytes to save, where its snapshot ends (its last
+    // cluster) and how much of it the volume device shows.
+    let mut parts = Vec::new();
+    for (p, method) in layout.partitions.iter().zip(&methods) {
+        let readable =
+            volume_device(p.number).map_or(p.length, |d| BlockSource::size(d).min(p.length));
+        let (part, clusters_end) = match method {
+            Method::Snapshot(volume) => {
+                let (shot, root) = snapshot_device(p.number);
+                let shot_size = BlockSource::size(shot).min(p.length);
+                let (mut part, clusters_end) =
+                    volume_ranges(request, volume, shot.file(), shot_size, root, rep);
+                // The tail after the last cluster (NTFS backup boot sector)
+                // may be hidden by the snapshot; it is read from the disk,
+                // for BitLocker from the live volume.
+                part.push(clusters_end..readable);
+                (part, clusters_end)
+            }
+            Method::Live(volume) => {
+                let opened;
+                let live = match volume_device(p.number) {
+                    Some(device) => device,
+                    None => {
+                        opened = RawDevice::open_read(&volume.device_path(), volume.sector_size)
+                            .with_context(|| format!("cannot open {}", volume.display_name()))?;
+                        &opened
+                    }
+                };
+                match used_ranges(
+                    live.file(),
+                    readable,
+                    volume.cluster_size,
+                    volume.sector_size,
+                ) {
+                    Ok(allocation) => {
+                        let mut used = allocation.used;
+                        used.push(allocation.clusters_end..readable);
+                        (used, readable)
+                    }
+                    Err(error) => {
+                        warn!(
+                            rep,
+                            "cannot read the allocation of {} ({error}); saving every sector",
+                            volume.display_name()
+                        );
+                        (RangeSet::full(readable), readable)
+                    }
+                }
+            }
+            Method::AllSectors(_) => (RangeSet::full(p.length), p.length),
+        };
+        parts.push((part.clamp(0..readable), clusters_end, readable));
+    }
+
+    // Decrypted snapshots: clusters from the snapshot, the tail from the volume.
+    let mut patched = Vec::new();
+    for ((p, method), (_, clusters_end, _)) in layout.partitions.iter().zip(&methods).zip(&parts) {
+        if let (Method::Snapshot(_), Some(live)) = (method, volume_device(p.number)) {
+            let (shot, _) = snapshot_device(p.number);
+            patched.push((p.number, PatchedSource::new(shot, live, *clusters_end)));
+        }
+    }
 
     let gaps = layout.gaps();
     let (small, large): (Vec<_>, Vec<_>) = gaps
@@ -205,51 +305,20 @@ pub(crate) fn backup_disk(
     let mut used = layout.table_ranges().union(&RangeSet::from_ranges(small));
     let mut source = MappedSource::new(&device);
     let mut selected = Vec::new();
-    for (p, method) in layout.partitions.iter().zip(&methods) {
-        let part = match method {
-            Method::Snapshot(volume) => {
-                let (_, shot, root) = snapshot_devices
-                    .iter()
-                    .find(|(n, _, _)| *n == p.number)
-                    .expect("opened above");
-                let shot_size = BlockSource::size(shot).min(p.length);
-                let (part, clusters_end) =
-                    volume_ranges(request, volume, shot.file(), shot_size, root, rep);
-                // The tail after the last cluster (NTFS backup boot sector)
-                // may be hidden by the snapshot; it is read from the disk.
-                source.map(p.offset..p.offset + clusters_end, shot);
-                let mut part = part;
-                part.push(clusters_end..p.length);
-                part
-            }
-            Method::Live(volume) => {
-                let live = RawDevice::open_read(&volume.device_path(), volume.sector_size)
-                    .with_context(|| format!("cannot open {}", volume.display_name()))?;
-                match used_ranges(
-                    live.file(),
-                    p.length,
-                    volume.cluster_size,
-                    volume.sector_size,
-                ) {
-                    Ok(allocation) => allocation.used,
-                    Err(error) => {
-                        warn!(
-                            rep,
-                            "cannot read the allocation of {} ({error}); saving every sector",
-                            volume.display_name()
-                        );
-                        RangeSet::full(p.length)
-                    }
-                }
-            }
-            Method::AllSectors(_) => RangeSet::full(p.length),
-        };
-        let part = part.clamp(0..p.length);
+    for ((p, method), (part, clusters_end, readable)) in
+        layout.partitions.iter().zip(&methods).zip(&parts)
+    {
+        let start = p.offset;
+        if let Some((_, patched)) = patched.iter().find(|(n, _)| *n == p.number) {
+            source.map(start..start + readable, patched);
+        } else if let Some(live) = volume_device(p.number) {
+            source.map(start..start + readable, live);
+        } else if let Method::Snapshot(_) = method {
+            source.map(start..start + clusters_end, snapshot_device(p.number).0);
+        }
         selected.push(part.total_len());
         used = used.union(&RangeSet::from_ranges(
-            part.ranges()
-                .iter()
-                .map(|r| p.offset + r.start..p.offset + r.end),
+            part.ranges().iter().map(|r| start + r.start..start + r.end),
         ));
     }
 
@@ -260,7 +329,9 @@ pub(crate) fn backup_disk(
             .position(|q| q == p)
             .expect("own partition");
         let method = match &methods[i] {
+            Method::Snapshot(_) if decrypted[i] => "used blocks, VSS snapshot, decrypted",
             Method::Snapshot(_) => "used blocks, VSS snapshot",
+            Method::Live(_) if decrypted[i] => "used blocks, live volume, decrypted",
             Method::Live(_) => "used blocks, live volume",
             Method::AllSectors(why) => why,
         };
@@ -293,6 +364,30 @@ pub(crate) fn backup_disk(
         set.complete()?;
     }
     Ok(())
+}
+
+/// Whether the volume is BitLocker-encrypted on the disk (read from its
+/// partition's first sector; false if that cannot be read).
+pub(crate) fn is_bitlocker(volume: &VolumeInfo) -> bool {
+    let [extent] = volume.extents.as_slice() else {
+        return false;
+    };
+    let path = format!(r"\\.\PhysicalDrive{}", extent.disk_number);
+    let Ok(disk) = RawDevice::open_read(&path, volume.sector_size) else {
+        return false;
+    };
+    let mut first = AlignedBuf::zeroed(volume.sector_size as usize);
+    disk.read_at(extent.offset, &mut first).is_ok()
+        && identify_boot_sector(&first) == BootSectorKind::BitLocker
+}
+
+/// Warning for a BitLocker volume that is saved decrypted.
+pub(crate) fn decrypted_warning(name: &str) -> String {
+    format!(
+        "{name} is encrypted with BitLocker and is saved DECRYPTED: anyone with access to the \
+         image can read its data, so keep the image in a safe place. A restored copy is not \
+         encrypted; turn BitLocker on again afterwards"
+    )
 }
 
 /// Volumes up to this size without a drive letter (System Reserved,

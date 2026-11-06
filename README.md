@@ -50,6 +50,14 @@ attached Windows keeps the clone offline; do not set it online there, or
 Windows gives it a new ID and it no longer starts. Remove the original disk
 and boot from the clone.
 
+BitLocker volumes that are unlocked (always the case for the running
+Windows) are saved decrypted through a VSS snapshot: only used blocks,
+compressed and consistent. The image then holds the data unencrypted, so keep
+it safe, and a restored copy is not encrypted until BitLocker is turned on
+again. `--bitlocker-raw` copies such partitions as encrypted sectors instead
+(every sector, hardly compressible, no snapshot). Locked volumes, e.g. in
+Windows PE without `manage-bde -unlock`, can only be copied that way.
+
 Commands that work on an image append a log next to it (`c.dimg` -> `c.log`);
 `--log FILE` writes elsewhere, `--no-log` turns it off, `--log-level debug`
 adds details such as every VSS call. Exit codes: 0 = OK, 1 = error,

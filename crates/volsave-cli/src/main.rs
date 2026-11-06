@@ -87,6 +87,10 @@ enum Command {
         /// partition (dynamic disks, Storage Spaces, unknown layouts; no VSS)
         #[arg(long)]
         all_sectors: bool,
+        /// Disks only: copy BitLocker volumes as encrypted sectors (every
+        /// sector, no VSS) instead of decrypted through a VSS snapshot
+        #[arg(long)]
+        bitlocker_raw: bool,
     },
     /// Restore an image onto a volume (overwrites the volume)
     Restore {
@@ -248,6 +252,7 @@ fn run(command: Command) -> Result<()> {
             files_not_to_backup,
             comment,
             all_sectors,
+            bitlocker_raw,
         } => windows_cmds::backup(volsave_ops::BackupRequest {
             source,
             image,
@@ -261,6 +266,7 @@ fn run(command: Command) -> Result<()> {
             files_not_to_backup: files_not_to_backup.into(),
             comment,
             all_sectors,
+            bitlocker_raw,
         }),
         #[cfg(windows)]
         Command::Restore {
