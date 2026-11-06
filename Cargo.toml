@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.85"
 publish = false
@@ -40,3 +40,8 @@ windows = { version = "0.62", features = [
 ] }
 windows-link = "0.2"
 zstd = "0.13"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
