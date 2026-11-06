@@ -1,5 +1,7 @@
 # VolSave
 
+*Deutsche Beschreibung: [unten](#deutsch).*
+
 Disk and volume imaging for Windows, written in Rust. Backups use the
 Volume Shadow Copy Service (VSS); images are compressed with zstd.
 
@@ -83,3 +85,71 @@ The command line tool and the libraries in this repository are free
 software under the GNU General Public License, version 3 or later
 ([LICENSE](LICENSE)). The graphical interface VolSave Pro is a separate,
 commercial product.
+
+---
+
+## Deutsch
+
+VolSave sichert Datenträger und Volumes unter Windows, geschrieben in Rust.
+Gesichert wird über den Volumeschattenkopie-Dienst (VSS), die Images werden
+mit zstd komprimiert.
+
+Stand: frühe Entwicklung, aber im Einsatz. Das Kommandozeilenprogramm
+sichert, prüft, stellt wieder her und führt zusammen, sowohl einzelne
+Volumes als auch ganze Datenträger (Partitionstabelle, Bootcode und alle
+Partitionen). Klone ganzer Datenträger mit Windows 10 und 11 (BIOS/MBR und
+UEFI/GPT) wurden wiederhergestellt und gestartet, in virtuellen Maschinen
+und auf echter Hardware, auch aus Windows PE heraus.
+
+Download: `volsave.exe` unter [Releases](../../releases). Läuft ohne
+Installation unter Windows 10/11 und in Windows PE.
+
+Eine grafische Oberfläche gehört zum getrennten, kommerziellen Produkt
+VolSave Pro, das auf diesen Bibliotheken aufbaut; verschlüsselte Images und
+Netzwerkziele (SMB, FTP, SFTP) sind dort geplant.
+
+### Verwendung (Windows, als Administrator)
+
+Die Befehle stehen oben unter „Usage“. Kurz:
+
+- `volsave list` zeigt Datenträger und Volumes.
+- `volsave backup C: E:\backup\c.dimg` sichert Laufwerk C:, dazu entsteht
+  die Hashliste `c.dhsh`.
+- `--diff E:\backup\c.dhsh` erzeugt ein Differenz-Image: nur was sich seit
+  der Vollsicherung geändert hat. Es gibt keine inkrementellen Ketten.
+- `volsave backup HD0 …` sichert den ganzen Datenträger 0; `--all-sectors`
+  kopiert jeden Sektor (für unbekannte Aufteilungen).
+- `volsave verify` prüft ein Image, `volsave info` zeigt seinen Inhalt.
+- `volsave restore … HD1 --verify` spielt ein Image zurück und liest das
+  Ziel danach zum Vergleich wieder ein; `--partition 2` stellt nur eine
+  Partition aus einem Datenträger-Image wieder her.
+
+Ein wiederhergestellter Datenträger behält die Datenträgerkennung des
+Originals. Solange beide angeschlossen sind, lässt Windows den Klon offline;
+dort nicht online schalten, sonst vergibt Windows eine neue Kennung und er
+startet nicht mehr. Original abklemmen und vom Klon starten.
+
+In Windows PE werden Volumes direkt ohne VSS gelesen, weil das installierte
+Windows nicht läuft.
+
+BitLocker-Volumes, die entsperrt sind (beim laufenden Windows immer),
+werden entschlüsselt über einen VSS-Snapshot gesichert: nur belegte Blöcke,
+komprimiert und konsistent. Das Image enthält die Daten dann
+**unverschlüsselt**, also sicher aufbewahren; eine wiederhergestellte Kopie
+ist unverschlüsselt, bis BitLocker wieder eingeschaltet wird.
+`--bitlocker-raw` kopiert solche Partitionen stattdessen als verschlüsselte
+Sektoren (jeder Sektor, kaum komprimierbar, ohne Snapshot). Gesperrte
+Volumes, etwa in Windows PE ohne `manage-bde -unlock`, lassen sich nur so
+kopieren.
+
+Befehle, die mit einem Image arbeiten, schreiben ein Protokoll daneben
+(`c.dimg` -> `c.log`); `--log DATEI` schreibt woandershin, `--no-log`
+schaltet es ab, `--log-level debug` protokolliert Details wie jeden
+VSS-Aufruf. Rückgabewerte: 0 = OK, 1 = Fehler, 2 = OK mit Warnungen.
+
+### Lizenz
+
+Das Kommandozeilenprogramm und die Bibliotheken in diesem Repository sind
+freie Software unter der GNU General Public License, Version 3 oder später
+([LICENSE](LICENSE)). Die grafische Oberfläche VolSave Pro ist ein
+getrenntes, kommerzielles Produkt.
