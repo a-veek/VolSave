@@ -22,7 +22,7 @@ Download: `volsave.exe` under [Releases](../../releases); it runs on Windows
 | `crates/volsave-core` | Platform-independent engine: used-range planning, parallel backup pipeline, restore |
 | `crates/volsave-win` | Windows: volumes, disks, VSS snapshots, allocation bitmaps, raw device I/O |
 | `crates/volsave-ops` | Operations shared by the command line tool and GUIs: backup, restore, opening images |
-| `crates/volsave-cli` | Command line tool `volsave` |
+| `crates/volsave-cli` | Command line tool `volsave`; also a library, so VolSave Pro offers the same commands |
 
 A graphical interface is part of the separate commercial product VolSave
 Pro, which builds on these crates; encrypted images and network targets

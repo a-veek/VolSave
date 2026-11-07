@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lib]
+name = "volsave_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "volsave"
 path = "src/main.rs"
