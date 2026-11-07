@@ -21,8 +21,35 @@ use console::Console;
 #[cfg(windows)]
 const PRO_ENCRYPTION_HINT: &str = "VolSave Pro can save encrypted images";
 use log::LogLevel;
-use volsave_ops::{Reader, find_base, hash_path, open_image, open_view, write_hash_list};
+use volsave_ops::{
+    Reader, check_output, find_base, hash_path, open_image, open_view, write_hash_list,
+};
 pub(crate) use volsave_ops::{human, now_unix, tool_name};
+
+/// Shown at the end of `volsave --help`.
+const EXAMPLES: &str = r"Examples (run as administrator):
+  volsave list                                    show disks and volumes
+
+  Full backup of drive C: (also writes the hash list E:\backup\c.dhsh):
+    volsave backup C: E:\backup\c.dimg
+  Differential backup: only what changed since the full backup:
+    volsave backup C: E:\backup\c-mon.dimg --diff E:\backup\c.dhsh
+  Whole disk 0 with partition table and all partitions:
+    volsave backup HD0 E:\backup\disk0.dimg
+
+  Check an image and show what it contains:
+    volsave verify E:\backup\c.dimg
+    volsave info E:\backup\disk0.dimg
+
+  Restore onto volume F: (a differential image finds its full image):
+    volsave restore E:\backup\c-mon.dimg F: --verify
+  Restore a disk image onto disk 1 and read it back:
+    volsave restore E:\backup\disk0.dimg HD1 --verify
+  Only partition 2 of a disk image onto volume F:
+    volsave restore E:\backup\disk0.dimg F: --partition 2
+
+Existing images are never overwritten without --overwrite, and the full
+image of a --diff never. Details: volsave <command> --help";
 
 /// Set by Ctrl+C; long operations stop at the next block.
 static CANCEL: AtomicBool = AtomicBool::new(false);
@@ -31,7 +58,8 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 #[command(
     name = "volsave",
     version = volsave_ops::VERSION,
-    about = "Disk and volume imaging for Windows"
+    about = "Disk and volume imaging for Windows",
+    after_help = EXAMPLES
 )]
 struct Cli {
     #[command(subcommand)]
@@ -95,6 +123,9 @@ enum Command {
         /// sector, no VSS) instead of decrypted through a VSS snapshot
         #[arg(long)]
         bitlocker_raw: bool,
+        /// Replace IMAGE if it exists (never the full image given with --diff)
+        #[arg(long)]
+        overwrite: bool,
     },
     /// Restore an image onto a volume (overwrites the volume)
     Restore {
@@ -123,6 +154,9 @@ enum Command {
         output: PathBuf,
         #[arg(long)]
         base: Option<PathBuf>,
+        /// Replace OUTPUT if it exists (never one of the images read)
+        #[arg(long)]
+        overwrite: bool,
         #[command(flatten)]
         common: WriteOptions,
     },
@@ -144,6 +178,9 @@ enum Command {
         /// Disk images: extract only this partition (number as shown by `info`)
         #[arg(long)]
         partition: Option<u32>,
+        /// Replace OUTPUT if it exists (never one of the images read)
+        #[arg(long)]
+        overwrite: bool,
     },
 }
 
@@ -231,13 +268,15 @@ fn run(command: Command) -> Result<()> {
             output,
             base,
             partition,
-        } => extract(&image, &output, base.as_deref(), partition),
+            overwrite,
+        } => extract(&image, &output, base.as_deref(), partition, overwrite),
         Command::Merge {
             image,
             output,
             base,
             common,
-        } => merge(&image, &output, base.as_deref(), &common),
+            overwrite,
+        } => merge(&image, &output, base.as_deref(), &common, overwrite),
         #[cfg(windows)]
         Command::List => windows_cmds::list(),
         #[cfg(windows)]
@@ -257,6 +296,7 @@ fn run(command: Command) -> Result<()> {
             comment,
             all_sectors,
             bitlocker_raw,
+            overwrite,
         } => windows_cmds::backup(volsave_ops::BackupRequest {
             source,
             image,
@@ -272,6 +312,7 @@ fn run(command: Command) -> Result<()> {
             all_sectors,
             bitlocker_raw,
             decrypted_hint: Some(PRO_ENCRYPTION_HINT.into()),
+            overwrite,
         }),
         #[cfg(windows)]
         Command::Restore {
@@ -421,8 +462,15 @@ fn verify_one(path: &Path, mut reader: Reader) -> Result<()> {
     Ok(())
 }
 
-fn extract(path: &Path, output: &Path, base: Option<&Path>, partition: Option<u32>) -> Result<()> {
+fn extract(
+    path: &Path,
+    output: &Path,
+    base: Option<&Path>,
+    partition: Option<u32>,
+    overwrite: bool,
+) -> Result<()> {
     let image = open_view(path, base, &mut Console::default())?;
+    check_output(output, overwrite, &inputs(path, image.base_path.as_deref()))?;
     let mut view = match partition {
         Some(number) => image.into_partition(number)?.0,
         None => image.view,
@@ -442,8 +490,15 @@ fn extract(path: &Path, output: &Path, base: Option<&Path>, partition: Option<u3
     Ok(())
 }
 
-fn merge(path: &Path, output: &Path, base: Option<&Path>, common: &WriteOptions) -> Result<()> {
+fn merge(
+    path: &Path,
+    output: &Path,
+    base: Option<&Path>,
+    common: &WriteOptions,
+    overwrite: bool,
+) -> Result<()> {
     let image = open_view(path, base, &mut Console::default())?;
+    check_output(output, overwrite, &inputs(path, image.base_path.as_deref()))?;
     anyhow::ensure!(
         image.base_path.is_some(),
         "{} is not a differential image",
@@ -551,4 +606,9 @@ fn percent(progress: &Progress) -> f64 {
         0 => 100.0,
         total => progress.bytes_read as f64 * 100.0 / total as f64,
     }
+}
+
+/// The image a command reads and its full image, if any.
+fn inputs<'a>(image: &'a Path, base: Option<&'a Path>) -> Vec<&'a Path> {
+    std::iter::once(image).chain(base).collect()
 }

@@ -215,7 +215,23 @@ fn disk_images_show_partitions_and_extract_one() {
     assert_eq!(extract.status.code(), Some(0), "{extract:?}");
     assert!(fs::read(&part).unwrap() == disk.0[2 << 20..3 << 20]);
 
-    let missing = volsave(&["extract", image, part.to_str().unwrap(), "--partition", "3"]);
+    // Existing files are only replaced with --overwrite, the image never.
+    let again = volsave(&["extract", image, part.to_str().unwrap()]);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
+    let onto_image = volsave(&["extract", image, image, "--overwrite"]);
+    assert_eq!(onto_image.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&onto_image.stderr).contains("would be destroyed"));
+    assert!(volsave(&["verify", image]).status.success());
+
+    let missing = volsave(&[
+        "extract",
+        image,
+        part.to_str().unwrap(),
+        "--partition",
+        "3",
+        "--overwrite",
+    ]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&missing.stderr).contains("no partition 3"));
 }

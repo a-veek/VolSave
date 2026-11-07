@@ -62,6 +62,8 @@ Differential images (`--diff`) store only what changed since a full backup
 and build on its hash list; there are no incremental chains. In Windows PE
 volumes are read directly without VSS: the installed Windows is not running.
 `restore --verify` reads the target back and compares it with the image.
+Existing images are only replaced with `--overwrite`; the full image of a
+`--diff` backup and the images a command reads are never overwritten.
 
 BitLocker volumes that are unlocked (always the case for the running
 Windows) are saved decrypted through a VSS snapshot: only used blocks,
@@ -123,6 +125,10 @@ Die Befehle stehen oben unter „Usage“. Kurz:
 - `volsave restore … HD1 --verify` spielt ein Image zurück und liest das
   Ziel danach zum Vergleich wieder ein; `--partition 2` stellt nur eine
   Partition aus einem Datenträger-Image wieder her.
+- Ein vorhandenes Image wird nur mit `--overwrite` ersetzt; das Voll-Image
+  eines `--diff` und die Images, die ein Befehl liest, werden nie
+  überschrieben.
+- `volsave --help` zeigt Beispiele.
 
 Ein wiederhergestellter Datenträger behält die Datenträgerkennung des
 Originals. Solange beide angeschlossen sind, lässt Windows den Klon offline;

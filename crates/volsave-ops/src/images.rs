@@ -234,3 +234,52 @@ mod tests {
         assert!(!dir.path().join("a.dhsh.tmp").exists());
     }
 }
+
+/// Refuses to create `output` over an existing file unless `overwrite`, and
+/// never over one of `inputs` (images or hash lists the command reads).
+pub fn check_output(output: &Path, overwrite: bool, inputs: &[&Path]) -> Result<()> {
+    if !output.exists() {
+        return Ok(());
+    }
+    let target = fs::canonicalize(output).ok();
+    if let Some(input) = inputs
+        .iter()
+        .find(|path| target.is_some() && fs::canonicalize(path).ok() == target)
+    {
+        bail!(
+            "{} is also read by this command ({}) and would be destroyed; choose another file name",
+            output.display(),
+            input.display()
+        );
+    }
+    if !overwrite {
+        bail!(
+            "{} already exists; choose another file name (or allow overwriting it, \
+             --overwrite on the command line)",
+            output.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn existing_files_and_inputs_are_protected() {
+        let dir = std::env::temp_dir().join(format!("volsave-check-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let full = dir.join("full.dimg");
+        let other = dir.join("other.dimg");
+        fs::write(&full, b"x").unwrap();
+        assert!(check_output(&other, false, &[&full]).is_ok());
+        fs::write(&other, b"y").unwrap();
+        assert!(check_output(&other, false, &[&full]).is_err());
+        assert!(check_output(&other, true, &[&full]).is_ok());
+        // The same file under another spelling is still an input.
+        let spelled = dir.join(".").join("full.dimg");
+        assert!(check_output(&spelled, true, &[&full]).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

@@ -49,6 +49,8 @@ pub struct BackupRequest {
     /// Added to the warning when a BitLocker volume is saved decrypted,
     /// e.g. where encrypted images are available.
     pub decrypted_hint: Option<String>,
+    /// Replace an existing image file (never the full image of `diff`).
+    pub overwrite: bool,
 }
 
 impl BackupRequest {
@@ -69,12 +71,14 @@ impl BackupRequest {
             all_sectors: false,
             bitlocker_raw: false,
             decrypted_hint: None,
+            overwrite: false,
         }
     }
 }
 
 /// Backs up a volume or a whole disk; a partly written image is deleted.
 pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Reporter) -> Result<()> {
+    check_target(request)?;
     // VSS does not work in Windows PE, and it is not needed there: the
     // installed Windows is not running and does not change its volumes.
     let without_vss;
@@ -432,4 +436,31 @@ fn source_info(volume: &VolumeInfo, size: u64) -> SourceInfo {
         partition_offset: volume.extents.first().map(|e| e.offset),
         hostname: std::env::var("COMPUTERNAME").ok(),
     }
+}
+
+/// Protects existing images, above all the full image a differential
+/// backup builds on: overwriting it would leave the new image without base.
+fn check_target(request: &BackupRequest) -> Result<()> {
+    let mut inputs = Vec::new();
+    if let Some(hash_file) = &request.diff {
+        inputs.push(hash_file.clone());
+        inputs.push(hash_file.with_extension(IMAGE_EXTENSION));
+    }
+    let inputs: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
+    crate::check_output(&request.image, request.overwrite, &inputs)?;
+    // The full image may have been renamed or moved away from its hash list.
+    if let Some(hash_file) = &request.diff
+        && request.image.exists()
+        && let Ok(list) = read_hash_list(hash_file)
+        && let Ok(existing) = crate::open_image(&request.image, &mut crate::Silent)
+        && existing.header().image_id == list.image_id
+    {
+        bail!(
+            "{} is the full image that {} belongs to; a differential backup must not \
+             overwrite it. Choose another file name",
+            request.image.display(),
+            hash_file.display()
+        );
+    }
+    Ok(())
 }

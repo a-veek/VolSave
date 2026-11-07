@@ -19,7 +19,7 @@ mod disk;
 mod restore;
 
 pub use images::{
-    OpenedImage, Reader, find_base, hash_path, open_image, open_view, read_hash_list,
+    OpenedImage, Reader, check_output, find_base, hash_path, open_image, open_view, read_hash_list,
     write_hash_list,
 };
 pub use report::{Level, Reporter, Silent, Stage};
