@@ -4,9 +4,8 @@ All notable changes to VolSave. Downloads: [Releases](../../releases).
 *Deutsch: [unten](#deutsch) · Español: [abajo](#español).*
 
 ## 0.2.5 – 2026-11-07
-- The command line tool is also a library (`volsave_cli::main` with an
-  edition), so VolSave Pro ships the same commands as `volsave-pro-cli.exe`.
-  No change in behaviour.
+- The command line is now also a library crate (`volsave_cli::main` with an
+  edition), so other front-ends can reuse it. No change in behaviour.
 
 ## 0.2.4 – 2026-11-07
 - Existing images are no longer overwritten silently: `backup`, `merge` and
@@ -53,9 +52,9 @@ All notable changes to VolSave. Downloads: [Releases](../../releases).
 Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases).
 
 ### 0.2.5 – 07.11.2026
-- Das Kommandozeilenprogramm ist zusätzlich eine Bibliothek; VolSave Pro
-  liefert damit dieselben Befehle als `volsave-pro-cli.exe` aus. Am
-  Verhalten ändert sich nichts.
+- Das Kommandozeilenprogramm ist jetzt zusätzlich eine Bibliothek
+  (`volsave_cli::main` mit einer Edition); andere Oberflächen können sie
+  nutzen. Am Verhalten ändert sich nichts.
 
 ### 0.2.4 – 07.11.2026
 - Vorhandene Images werden nicht mehr still überschrieben: `backup`, `merge`
@@ -106,9 +105,9 @@ Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases
 Todos los cambios importantes de VolSave. Descargas en [Releases](../../releases).
 
 ### 0.2.5 – 07/11/2026
-- La herramienta de línea de comandos es también una biblioteca; así
-  VolSave Pro incluye los mismos comandos como `volsave-pro-cli.exe`. El
-  comportamiento no cambia.
+- La línea de comandos es ahora también una biblioteca (`volsave_cli::main`
+  con una edición); otras interfaces pueden reutilizarla. El comportamiento
+  no cambia.
 
 ### 0.2.4 – 07/11/2026
 - Las imágenes existentes ya no se sobrescriben sin aviso: `backup`, `merge`
