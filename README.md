@@ -1,6 +1,6 @@
 # VolSave
 
-*Deutsche Beschreibung: [unten](#deutsch).*
+*Deutsche Beschreibung: [unten](#deutsch). Changes per version: [CHANGELOG](CHANGELOG.md).*
 
 Disk and volume imaging for Windows, written in Rust. Backups use the
 Volume Shadow Copy Service (VSS); images are compressed with zstd.
