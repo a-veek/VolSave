@@ -1,6 +1,6 @@
 # VolSave
 
-*Deutsche Beschreibung: [unten](#deutsch). Changes per version: [CHANGELOG](CHANGELOG.md).*
+*Deutsch: [unten](#deutsch) · Español: [abajo](#español) · Changes per version: [CHANGELOG](CHANGELOG.md).*
 
 Disk and volume imaging for Windows, written in Rust. Backups use the
 Volume Shadow Copy Service (VSS); images are compressed with zstd.
@@ -159,3 +159,75 @@ Das Kommandozeilenprogramm und die Bibliotheken in diesem Repository sind
 freie Software unter der GNU General Public License, Version 3 oder später
 ([LICENSE](LICENSE)). Die grafische Oberfläche VolSave Pro ist ein
 getrenntes, kommerzielles Produkt.
+
+---
+
+## Español
+
+VolSave crea copias de seguridad de discos y volúmenes en Windows, escrito
+en Rust. Las copias se hacen mediante el Servicio de instantáneas de
+volumen (VSS); las imágenes se comprimen con zstd.
+
+Estado: desarrollo temprano, pero ya en uso. La herramienta de línea de
+comandos crea, verifica, restaura y fusiona copias de volúmenes individuales
+y de discos completos (tabla de particiones, código de arranque y todas las
+particiones). Se han restaurado y arrancado clones de discos completos con
+Windows 10 y 11 (BIOS/MBR y UEFI/GPT), en máquinas virtuales y en hardware
+real, también desde Windows PE.
+
+Descarga: `volsave.exe` en [Releases](../../releases). Funciona sin
+instalación en Windows 10/11 y en Windows PE.
+
+La interfaz gráfica forma parte del producto comercial independiente
+VolSave Pro, basado en estas bibliotecas; allí están previstas las imágenes
+cifradas y los destinos de red (SMB, FTP, SFTP).
+
+### Uso (Windows, como administrador)
+
+Los comandos están arriba, en «Usage». En resumen:
+
+- `volsave list` muestra discos y volúmenes.
+- `volsave backup C: E:\backup\c.dimg` copia la unidad C: y crea además la
+  lista de hashes `c.dhsh`.
+- `--diff E:\backup\c.dhsh` crea una imagen diferencial: solo lo que ha
+  cambiado desde la copia completa. No hay cadenas incrementales.
+- `volsave backup HD0 …` copia el disco 0 completo; `--all-sectors` copia
+  todos los sectores (para particionados desconocidos).
+- `volsave verify` comprueba una imagen, `volsave info` muestra su
+  contenido.
+- `volsave restore … HD1 --verify` restaura una imagen y después vuelve a
+  leer el destino para compararlo; `--partition 2` restaura solo una
+  partición de una imagen de disco.
+- Una imagen existente solo se reemplaza con `--overwrite`; la imagen
+  completa de un `--diff` y las imágenes que lee un comando nunca se
+  sobrescriben.
+- `volsave --help` muestra ejemplos.
+
+Un disco restaurado conserva el identificador del original. Mientras ambos
+estén conectados, Windows mantiene el clon sin conexión; no lo ponga en
+línea, o Windows le asignará un identificador nuevo y ya no arrancará.
+Desconecte el disco original y arranque desde el clon.
+
+En Windows PE los volúmenes se leen directamente sin VSS, porque el Windows
+instalado no está en ejecución.
+
+Los volúmenes BitLocker desbloqueados (el Windows en ejecución siempre lo
+está) se guardan descifrados mediante una instantánea VSS: solo los bloques
+usados, comprimidos y coherentes. La imagen contiene entonces los datos
+**sin cifrar**, así que guárdela en un lugar seguro; una copia restaurada no
+está cifrada hasta que se vuelva a activar BitLocker. `--bitlocker-raw`
+copia esas particiones como sectores cifrados (todos los sectores, apenas
+comprimibles, sin instantánea). Los volúmenes bloqueados, p. ej. en
+Windows PE sin `manage-bde -unlock`, solo se pueden copiar así.
+
+Los comandos que trabajan con una imagen escriben un registro junto a ella
+(`c.dimg` -> `c.log`); `--log ARCHIVO` lo escribe en otro lugar, `--no-log`
+lo desactiva, `--log-level debug` añade detalles como cada llamada a VSS.
+Códigos de salida: 0 = correcto, 1 = error, 2 = correcto con advertencias.
+
+### Licencia
+
+La herramienta de línea de comandos y las bibliotecas de este repositorio
+son software libre bajo la GNU General Public License, versión 3 o
+posterior ([LICENSE](LICENSE)). La interfaz gráfica VolSave Pro es un
+producto comercial independiente.

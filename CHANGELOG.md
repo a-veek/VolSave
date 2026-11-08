@@ -1,7 +1,7 @@
 # Changelog
 
 All notable changes to VolSave. Downloads: [Releases](../../releases).
-*Deutsche Fassung: [unten](#deutsch).*
+*Deutsch: [unten](#deutsch) · Español: [abajo](#español).*
 
 ## 0.2.5 – 2026-11-07
 - The command line tool is also a library (`volsave_cli::main` with an
@@ -97,4 +97,57 @@ Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases
 - Erste Version: Image-Format mit zstd-Kompression, Sicherung über VSS,
   `FilesNotToBackup`, Protokoll, Sichern und Wiederherstellen ganzer
   Datenträger (MBR und GPT), Differenz-Images, Prüfen und Zusammenführen.
+  GPL-3.0-or-later.
+
+---
+
+## Español
+
+Todos los cambios importantes de VolSave. Descargas en [Releases](../../releases).
+
+### 0.2.5 – 07/11/2026
+- La herramienta de línea de comandos es también una biblioteca; así
+  VolSave Pro incluye los mismos comandos como `volsave-pro-cli.exe`. El
+  comportamiento no cambia.
+
+### 0.2.4 – 07/11/2026
+- Las imágenes existentes ya no se sobrescriben sin aviso: `backup`, `merge`
+  y `extract` rechazan un destino existente, salvo con `--overwrite`.
+- `backup --diff` nunca sobrescribe la imagen completa a la que pertenece la
+  lista de hashes, y ningún comando escribe sobre una imagen que lee.
+- `volsave --help` muestra ejemplos: copia completa, copia diferencial,
+  verificación, restauración de volúmenes y discos.
+
+### 0.2.3 – 06/11/2026
+- EXE más pequeño: compilaciones sin símbolos y con LTO completa.
+- README actualizado, descripción en alemán añadida.
+
+### 0.2.2 – 06/11/2026
+- La advertencia de BitLocker menciona que VolSave Pro puede guardar
+  imágenes cifradas.
+
+### 0.2.1 – 06/11/2026
+- Los volúmenes BitLocker desbloqueados se guardan descifrados mediante una
+  instantánea VSS: solo los bloques usados, comprimidos y coherentes, mucho
+  más rápido que antes. Una advertencia indica que la imagen contiene los
+  datos sin cifrar.
+- `--bitlocker-raw` mantiene el comportamiento anterior (copia cifrada
+  sector a sector).
+- Los volúmenes BitLocker bloqueados se copian sector a sector, con la
+  indicación de desbloquearlos antes (`manage-bde -unlock`).
+
+### 0.2.0 – 28/10/2026
+- Copia y restauración trasladadas a la biblioteca común `volsave-ops`.
+- Windows PE: los volúmenes se leen directamente, sin VSS.
+- Las imágenes diferenciales ya no tienen lista de hashes propia.
+- `--version` y los registros indican el commit de git.
+
+### 0.1.1 – 27/10/2026
+- `restore --verify` vuelve a leer el destino y lo compara con la imagen.
+- Tras una copia se muestran los bytes de los bloques.
+
+### 0.1.0 – 26/10/2026
+- Primera versión: formato de imagen con compresión zstd, copias mediante
+  VSS, `FilesNotToBackup`, registro, copia y restauración de discos
+  completos (MBR y GPT), imágenes diferenciales, verificación y fusión.
   GPL-3.0-or-later.
