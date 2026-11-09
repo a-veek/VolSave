@@ -186,7 +186,7 @@ pub(crate) fn backup_disk(
             _ => Method::AllSectors("no file system known to Windows"),
         };
         if decrypt && let Some(v) = volume {
-            warn!(rep, "{}", decrypted_warning(v.display_name(), request));
+            report_decrypted(rep, v.display_name(), request);
         }
         methods.push(method);
         decrypted.push(decrypt);
@@ -381,8 +381,23 @@ pub(crate) fn is_bitlocker(volume: &VolumeInfo) -> bool {
         && identify_boot_sector(&first) == BootSectorKind::BitLocker
 }
 
+/// Warns about a BitLocker volume that is saved decrypted; if the image
+/// itself is encrypted, only the restored copy is at risk.
+pub(crate) fn report_decrypted(rep: &mut dyn Reporter, name: &str, request: &BackupRequest) {
+    if crate::store::store().encrypts() {
+        warn!(
+            rep,
+            "{name} is encrypted with BitLocker and is read decrypted; the image is encrypted \
+             with its own password. A restored copy is NOT encrypted with BitLocker: turn \
+             BitLocker on again afterwards"
+        );
+    } else {
+        warn!(rep, "{}", decrypted_warning(name, request));
+    }
+}
+
 /// Warning for a BitLocker volume that is saved decrypted.
-pub(crate) fn decrypted_warning(name: &str, request: &BackupRequest) -> String {
+fn decrypted_warning(name: &str, request: &BackupRequest) -> String {
     let warning = format!(
         "{name} is encrypted with BitLocker and is saved DECRYPTED: anyone with access to the \
          image can read its data, so keep the image in a safe place. A restored copy is not \

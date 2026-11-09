@@ -53,6 +53,12 @@ pub trait ImageStore: Send + Sync {
     fn local_path(&self, path: &Path) -> Option<PathBuf> {
         Some(path.to_path_buf())
     }
+    /// Whether this store encrypts the images and hash lists it creates.
+    /// The warning for a BitLocker volume saved decrypted then only concerns
+    /// the restored copy.
+    fn encrypts(&self) -> bool {
+        false
+    }
 }
 
 /// Images in the file system.

@@ -3,6 +3,11 @@
 All notable changes to VolSave. Downloads: [Releases](../../releases).
 *Deutsch: [unten](#deutsch) · Español: [abajo](#español).*
 
+## 0.2.7 – 2026-11-09
+- For other front-ends: a storage that encrypts its images (`ImageStore::encrypts`)
+  gets a fitting warning for a BitLocker volume saved decrypted (only the
+  restored copy lacks BitLocker); the free VolSave is unchanged.
+
 ## 0.2.6 – 2026-11-09
 - Encrypted images and hash lists are recognised: commands say that the
   file is encrypted instead of calling it not a valid image.
@@ -57,6 +62,12 @@ All notable changes to VolSave. Downloads: [Releases](../../releases).
 ## Deutsch
 
 Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases).
+
+### 0.2.7 – 09.11.2026
+- Für andere Oberflächen: Verschlüsselt der Speicher seine Images
+  (`ImageStore::encrypts`), passt die Warnung zu einem entschlüsselt
+  gesicherten BitLocker-Volume (nur die wiederhergestellte Kopie hat kein
+  BitLocker); die freie VolSave bleibt unverändert.
 
 ### 0.2.6 – 09.11.2026
 - Verschlüsselte Images und Hashlisten werden erkannt: Die Befehle melden,
@@ -118,6 +129,12 @@ Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases
 ## Español
 
 Todos los cambios importantes de VolSave. Descargas en [Releases](../../releases).
+
+### 0.2.7 – 09/11/2026
+- Para otras interfaces: si el almacén cifra sus imágenes
+  (`ImageStore::encrypts`), la advertencia sobre un volumen BitLocker
+  guardado descifrado se adapta (solo la copia restaurada queda sin
+  BitLocker); el VolSave gratuito no cambia.
 
 ### 0.2.6 – 09/11/2026
 - Se reconocen las imágenes y listas de hashes cifradas: los comandos

@@ -122,11 +122,7 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         "--bitlocker-raw is for disks (HD0, HD1, ...); a volume is always read decrypted"
     );
     if crate::disk::is_bitlocker(&volume) {
-        warn!(
-            rep,
-            "{}",
-            crate::disk::decrypted_warning(volume.display_name(), request)
-        );
+        crate::disk::report_decrypted(rep, volume.display_name(), request);
     }
     let use_vss = !request.no_vss && volume.supports_vss();
     if !request.no_vss && !use_vss {
