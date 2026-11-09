@@ -606,8 +606,8 @@ pub(crate) fn plan_disk_restore(
                 "HD{number} holds the running Windows ({system_drive}); restore it from WinPE instead"
             );
         }
-        for file in image_files {
-            let path = std::path::absolute(file)?;
+        for file in image_files.iter().filter_map(|f| crate::store().local_path(f)) {
+            let path = std::path::absolute(&file)?;
             let path = path.to_string_lossy().to_ascii_lowercase();
             if volume
                 .mount_points

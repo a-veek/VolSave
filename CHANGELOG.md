@@ -3,6 +3,13 @@
 All notable changes to VolSave. Downloads: [Releases](../../releases).
 *Deutsch: [unten](#deutsch) · Español: [abajo](#español).*
 
+## 0.2.6 – 2026-11-09
+- Encrypted images and hash lists are recognised: commands say that the
+  file is encrypted instead of calling it not a valid image.
+- For other front-ends: all image files and hash lists are reached through
+  a replaceable storage interface (`ImageStore`), and an edition can add
+  command-line options. No change in behaviour.
+
 ## 0.2.5 – 2026-11-07
 - The command line is now also a library crate (`volsave_cli::main` with an
   edition), so other front-ends can reuse it. No change in behaviour.
@@ -50,6 +57,14 @@ All notable changes to VolSave. Downloads: [Releases](../../releases).
 ## Deutsch
 
 Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases).
+
+### 0.2.6 – 09.11.2026
+- Verschlüsselte Images und Hashlisten werden erkannt: Die Befehle melden,
+  dass die Datei verschlüsselt ist, statt sie als ungültiges Image zu
+  bezeichnen.
+- Für andere Oberflächen: Alle Image-Dateien und Hashlisten werden über eine
+  austauschbare Speicher-Schnittstelle (`ImageStore`) angesprochen, und eine
+  Edition kann Kommandozeilen-Optionen ergänzen. Keine Verhaltensänderung.
 
 ### 0.2.5 – 07.11.2026
 - Das Kommandozeilenprogramm ist jetzt zusätzlich eine Bibliothek
@@ -103,6 +118,15 @@ Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases
 ## Español
 
 Todos los cambios importantes de VolSave. Descargas en [Releases](../../releases).
+
+### 0.2.6 – 09/11/2026
+- Se reconocen las imágenes y listas de hashes cifradas: los comandos
+  indican que el archivo está cifrado en lugar de decir que no es una imagen
+  válida.
+- Para otras interfaces: todos los archivos de imagen y listas de hashes se
+  acceden mediante una interfaz de almacenamiento reemplazable
+  (`ImageStore`), y una edición puede añadir opciones de línea de comandos.
+  Sin cambios de comportamiento.
 
 ### 0.2.5 – 07/11/2026
 - La línea de comandos es ahora también una biblioteca (`volsave_cli::main`

@@ -87,8 +87,9 @@ pub fn plan_restore(
         );
     }
 
-    for file in &image_files {
-        let root = std::path::absolute(file)?
+    // Remote images cannot lie on the target.
+    for file in image_files.iter().filter_map(|f| crate::store().local_path(f)) {
+        let root = std::path::absolute(&file)?
             .to_string_lossy()
             .chars()
             .take(3)

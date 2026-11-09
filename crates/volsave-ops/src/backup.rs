@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use volsave_core::{AlignedBuf, BlockSource, PatchedSource, RangeSet, backup as run_backup};
 use volsave_format::{
     DiskSummary, FileHeader, HashList, IMAGE_EXTENSION, ImageMetadata, ImageWriter, SourceInfo,
-    SourceKind, part_path,
+    SourceKind,
 };
 use volsave_win::{
     ExclusionMode, RawDevice, SnapshotSet, VolumeInfo, enable_backup_privileges, excluded_files,
@@ -258,7 +258,7 @@ pub(crate) fn load_base(
     let Some(path) = &request.diff else {
         return Ok(None);
     };
-    if request.full_if_hash_missing && !path.exists() {
+    if request.full_if_hash_missing && !crate::store().exists(path) {
         note!(
             rep,
             "note: {} does not exist; making a full backup",
@@ -322,7 +322,7 @@ pub(crate) fn write_image(
         let full_image = hash_file.with_extension(IMAGE_EXTENSION);
         header.metadata.base_image_name = full_image
             .file_name()
-            .filter(|_| full_image.exists())
+            .filter(|_| crate::store().exists(&full_image))
             .map(|name| name.to_string_lossy().into_owned());
     }
 
@@ -359,7 +359,7 @@ pub(crate) fn write_image(
     let (stats, hashes, parts) = match result {
         Ok(done) => done,
         Err(error) => {
-            remove_image(&request.image);
+            crate::store().remove_image(&request.image);
             return Err(error);
         }
     };
@@ -415,14 +415,6 @@ fn last_sector_readable(device: &RawDevice, size: u64, sector_size: u32) -> bool
         .is_ok()
 }
 
-/// Deletes a partly written image with all its parts.
-fn remove_image(path: &Path) {
-    let mut part = 1;
-    while std::fs::remove_file(part_path(path, part)).is_ok() {
-        part += 1;
-    }
-}
-
 fn source_info(volume: &VolumeInfo, size: u64) -> SourceInfo {
     SourceInfo {
         kind: SourceKind::Volume,
@@ -450,7 +442,7 @@ fn check_target(request: &BackupRequest) -> Result<()> {
     crate::check_output(&request.image, request.overwrite, &inputs)?;
     // The full image may have been renamed or moved away from its hash list.
     if let Some(hash_file) = &request.diff
-        && request.image.exists()
+        && crate::store().exists(&request.image)
         && let Ok(list) = read_hash_list(hash_file)
         && let Ok(existing) = crate::open_image(&request.image, &mut crate::Silent)
         && existing.header().image_id == list.image_id

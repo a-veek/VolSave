@@ -45,3 +45,11 @@ pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 pub const IMAGE_EXTENSION: &str = "dimg";
 /// File extension of diff hash lists (without the dot).
 pub const HASH_LIST_EXTENSION: &str = "dhsh";
+/// First bytes of an encrypted image or hash list. VolSave itself does not
+/// encrypt; it recognises such files to say why it cannot read them.
+pub const ENCRYPTED_MAGIC: &[u8; 8] = b"VSENC1\0\0";
+
+/// Whether `start` (the first bytes of a file) marks an encrypted file.
+pub fn is_encrypted(start: &[u8]) -> bool {
+    start.starts_with(ENCRYPTED_MAGIC)
+}

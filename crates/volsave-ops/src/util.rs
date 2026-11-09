@@ -3,7 +3,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use volsave_core::BackupOptions;
-use volsave_format::{DEFAULT_ZSTD_LEVEL, SplitWriter};
+use volsave_format::DEFAULT_ZSTD_LEVEL;
+
+use crate::store::{ImageSink, store};
 
 /// Version with the git commit it was built from, e.g. `0.2.0 (137c403)`.
 pub const VERSION: &str = env!("VOLSAVE_VERSION");
@@ -68,8 +70,10 @@ impl WriteOptions {
         options
     }
 
-    pub fn create_sink(&self, path: &Path) -> Result<SplitWriter> {
-        SplitWriter::create(path, self.split_bytes)
+    /// Creates the image file(s) in the current [`store`](crate::store()).
+    pub fn create_sink(&self, path: &Path) -> Result<Box<dyn ImageSink>> {
+        store()
+            .create(path, self.split_bytes)
             .with_context(|| format!("cannot create {}", path.display()))
     }
 }

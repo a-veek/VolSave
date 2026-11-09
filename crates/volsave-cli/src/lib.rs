@@ -64,6 +64,11 @@ pub struct Edition {
     pub about: &'static str,
     /// Added to the warning when a BitLocker volume is saved decrypted.
     pub decrypted_hint: Option<&'static str>,
+    /// Adds options of the edition to the command line.
+    pub extend: Option<fn(clap::Command) -> clap::Command>,
+    /// Runs with all parsed arguments before the command, e.g. to install
+    /// an image store with [`volsave_ops::set_store`].
+    pub prepare: Option<fn(&clap::ArgMatches) -> Result<()>>,
 }
 
 impl Edition {
@@ -73,6 +78,8 @@ impl Edition {
         version: volsave_ops::VERSION,
         about: "Disk and volume imaging for Windows",
         decrypted_hint: Some("VolSave Pro can save encrypted images"),
+        extend: None,
+        prepare: None,
     };
 }
 
@@ -247,13 +254,17 @@ impl WriteOptions {
 /// Runs the command line of `edition` with the process arguments.
 pub fn main(edition: &Edition) -> ExitCode {
     let _ = EDITION.set(*edition);
-    let command = Cli::command()
+    let mut command = Cli::command()
         .name(edition.name)
         .bin_name(edition.name)
         .version(edition.version)
         .about(edition.about)
         .after_help(EXAMPLES.replace("volsave ", &format!("{} ", edition.name)));
-    let cli = match Cli::from_arg_matches(&command.get_matches()) {
+    if let Some(extend) = edition.extend {
+        command = extend(command);
+    }
+    let matches = command.get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
@@ -267,6 +278,11 @@ pub fn main(edition: &Edition) -> ExitCode {
     #[cfg(windows)]
     volsave_win::set_debug_hook(log::debug);
 
+    // First, so the log path below already sees the edition's store.
+    let prepared = match edition.prepare {
+        Some(prepare) => prepare(&matches),
+        None => Ok(()),
+    };
     let log_file = match (&cli.log, cli.no_log) {
         (_, true) => None,
         (Some(Some(path)), _) => Some(path.clone()),
@@ -277,7 +293,7 @@ pub fn main(edition: &Edition) -> ExitCode {
     {
         eprintln!("warning: cannot write the log {}: {error}", path.display());
     }
-    let result = run(cli.command);
+    let result = prepared.and_then(|()| run(cli.command));
     log::finish(&result)
 }
 
@@ -291,7 +307,18 @@ fn default_log_path(command: &Command) -> Option<PathBuf> {
         Command::Merge { output, .. } => output,
         Command::List | Command::Exclusions { .. } | Command::Info { .. } => return None,
     };
-    Some(image.with_extension("log"))
+    let log = image.with_extension("log");
+    // Images on remote targets log on this computer.
+    match volsave_ops::store().local_path(&log) {
+        Some(local) => Some(local),
+        None => {
+            let folder = std::env::var_os("ProgramData")
+                .map(|data| PathBuf::from(data).join("VolSave").join("logs"))
+                .unwrap_or_else(std::env::temp_dir);
+            let _ = std::fs::create_dir_all(&folder);
+            Some(folder.join(log.file_name()?))
+        }
+    }
 }
 
 fn run(command: Command) -> Result<()> {

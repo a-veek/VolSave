@@ -9,6 +9,7 @@
 #[macro_use]
 mod report;
 mod images;
+mod store;
 mod util;
 
 #[cfg(windows)]
@@ -23,6 +24,7 @@ pub use images::{
     write_hash_list,
 };
 pub use report::{Level, Reporter, Silent, Stage};
+pub use store::{ImageSink, ImageSource, ImageStore, LocalStore, set_store, store};
 pub use util::{VERSION, WriteOptions, human, now_unix, tool_name};
 
 #[cfg(windows)]

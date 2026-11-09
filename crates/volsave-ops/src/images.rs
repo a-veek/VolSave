@@ -1,25 +1,49 @@
 //! Opening images (with their full image, if differential) and hash lists.
 
-use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::Reporter;
+use crate::store::{ImageSource, store};
 use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 use volsave_core::{DiskLayout, ImageView, LayeredImage, Partition, PartitionView, SingleImage};
 use volsave_format::{
     FileHeader, HASH_LIST_EXTENSION, HashList, IMAGE_EXTENSION, ImageReader, SourceKind,
-    SplitReader,
+    is_encrypted,
 };
 
-pub type Reader = ImageReader<SplitReader>;
+pub type Reader = ImageReader<Box<dyn ImageSource>>;
+
+/// Said when a file is encrypted and the store cannot decrypt it.
+fn encrypted_error(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} is encrypted; open it with VolSave Pro and its password",
+        path.display()
+    )
+}
+
+/// Whether the file starts like an encrypted file, as seen without decryption.
+fn looks_encrypted(path: &Path) -> bool {
+    let mut start = [0u8; 8];
+    store()
+        .local_path(path)
+        .and_then(|local| fs::File::open(local).ok())
+        .is_some_and(|mut file| file.read_exact(&mut start).is_ok() && is_encrypted(&start))
+}
 
 pub fn open_image(path: &Path, rep: &mut dyn Reporter) -> Result<Reader> {
-    let source =
-        SplitReader::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let reader = ImageReader::open(source)
-        .with_context(|| format!("{} is not a valid image", path.display()))?;
+    let source = store()
+        .open(path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    let reader = match ImageReader::open(source) {
+        Ok(reader) => reader,
+        Err(_) if looks_encrypted(path) => return Err(encrypted_error(path)),
+        Err(error) => {
+            return Err(error).with_context(|| format!("{} is not a valid image", path.display()));
+        }
+    };
     if reader.index_rebuilt() {
         warn!(
             rep,
@@ -111,9 +135,9 @@ pub fn find_base(diff: &Path, header: &FileHeader, base_id: Uuid) -> Result<Path
     if let Some(name) = &header.metadata.base_image_name {
         candidates.push(folder.join(name));
     }
-    if let Ok(entries) = fs::read_dir(folder) {
-        for entry in entries.flatten() {
-            let path = entry.path();
+    let store = store();
+    if let Ok(entries) = store.list_folder(folder) {
+        for path in entries {
             let is_image = path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case(IMAGE_EXTENSION));
@@ -123,9 +147,10 @@ pub fn find_base(diff: &Path, header: &FileHeader, base_id: Uuid) -> Result<Path
         }
     }
     for candidate in candidates {
-        let id = File::open(&candidate)
+        let id = store
+            .open(&candidate)
             .ok()
-            .and_then(|file| ImageReader::open(BufReader::new(file)).ok())
+            .and_then(|source| ImageReader::open(source).ok())
             .map(|reader| reader.header().image_id);
         if id == Some(base_id) {
             return Ok(candidate);
@@ -143,23 +168,23 @@ pub fn hash_path(image: &Path) -> PathBuf {
 }
 
 pub fn read_hash_list(path: &Path) -> Result<HashList> {
-    let file =
-        File::open(path).with_context(|| format!("cannot open hash list {}", path.display()))?;
-    HashList::read_from(BufReader::new(file))
+    let data = store()
+        .read_file(path)
+        .with_context(|| format!("cannot open hash list {}", path.display()))?;
+    if is_encrypted(&data) {
+        return Err(encrypted_error(path));
+    }
+    HashList::read_from(data.as_slice())
         .with_context(|| format!("{} is not a valid hash list", path.display()))
 }
 
-/// Writes via a temporary file so an existing list is only replaced by a complete one.
+/// An existing list is only replaced by a complete one.
 pub fn write_hash_list(path: &Path, list: &HashList) -> Result<()> {
-    let temp = path.with_extension(format!("{HASH_LIST_EXTENSION}.tmp"));
-    let mut file = BufWriter::new(
-        File::create(&temp).with_context(|| format!("cannot create {}", temp.display()))?,
-    );
-    list.write_to(&mut file)?;
-    file.flush()?;
-    file.into_inner()?.sync_all()?;
-    fs::rename(&temp, path).with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(())
+    let mut data = Vec::new();
+    list.write_to(&mut data)?;
+    store()
+        .write_file(path, &data)
+        .with_context(|| format!("cannot write {}", path.display()))
 }
 
 #[cfg(test)]
@@ -238,13 +263,19 @@ mod tests {
 /// Refuses to create `output` over an existing file unless `overwrite`, and
 /// never over one of `inputs` (images or hash lists the command reads).
 pub fn check_output(output: &Path, overwrite: bool, inputs: &[&Path]) -> Result<()> {
-    if !output.exists() {
+    let store = store();
+    if !store.exists(output) {
         return Ok(());
     }
-    let target = fs::canonicalize(output).ok();
+    // Local files are compared by their real location, others by name.
+    let identity = |path: &Path| match store.local_path(path) {
+        Some(local) => fs::canonicalize(local).ok(),
+        None => Some(PathBuf::from(path.to_string_lossy().to_lowercase())),
+    };
+    let target = identity(output);
     if let Some(input) = inputs
         .iter()
-        .find(|path| target.is_some() && fs::canonicalize(path).ok() == target)
+        .find(|path| target.is_some() && identity(path) == target)
     {
         bail!(
             "{} is also read by this command ({}) and would be destroyed; choose another file name",
@@ -281,5 +312,25 @@ mod output_tests {
         let spelled = dir.join(".").join("full.dimg");
         assert!(check_output(&spelled, true, &[&full]).is_err());
         fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod encrypted_tests {
+    use super::*;
+
+    #[test]
+    fn encrypted_files_are_named_as_such() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut data = volsave_format::ENCRYPTED_MAGIC.to_vec();
+        data.extend([0u8; 600]);
+        let image = dir.path().join("e.dimg");
+        fs::write(&image, &data).unwrap();
+        let error = open_image(&image, &mut crate::Silent).err().unwrap();
+        assert!(format!("{error:#}").contains("is encrypted"), "{error:#}");
+        let hashes = dir.path().join("e.dhsh");
+        fs::write(&hashes, &data).unwrap();
+        let error = read_hash_list(&hashes).unwrap_err();
+        assert!(format!("{error:#}").contains("is encrypted"), "{error:#}");
     }
 }
