@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::block::{EncodedBlock, encode_block};
+use crate::block::{BlockHeader, EncodedBlock, encode_block};
 use crate::index::{IndexEntry, encode_footer, encode_index};
 use crate::util::CountingWriter;
 use crate::{Error, FileHeader, Result};
@@ -63,9 +63,17 @@ impl<W: Write> ImageWriter<W> {
             .offset
             .checked_add(u64::from(header.raw_len))
             .ok_or(Error::InvalidArgument("block offset overflows"))?;
-
+        // The fields are public; a header the reader would reject must not
+        // reach the file, where it would cut off every block after it.
+        let encoded = header.encode();
         let file_pos = self.sink.position();
-        self.sink.write_all(&header.encode())?;
+        let decoded = BlockHeader::decode(&encoded, file_pos)
+            .map_err(|_| Error::InvalidArgument("block header is not valid"))?;
+        if decoded != *header {
+            return Err(Error::InvalidArgument("block header is not valid"));
+        }
+
+        self.sink.write_all(&encoded)?;
         self.sink.write_all(&block.payload)?;
         self.index.push(IndexEntry {
             offset: header.offset,

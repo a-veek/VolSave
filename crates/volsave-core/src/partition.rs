@@ -246,7 +246,10 @@ impl SectorReader<'_> {
             .checked_mul(self.sector_size)
             .ok_or_else(|| invalid("sector number out of range"))?;
         let len = sectors * self.sector_size;
-        if offset + len > self.disk_size {
+        if offset
+            .checked_add(len)
+            .is_none_or(|end| end > self.disk_size)
+        {
             return Err(invalid(format!(
                 "sector {lba} lies beyond the end of the disk"
             )));
@@ -389,14 +392,20 @@ impl DiskLayout {
         }
 
         // The backup header says where the backup entries are; fall back to
-        // the usual place right before it if it cannot be read.
+        // the usual place right before it if it cannot be read, or if it
+        // points somewhere a backup array cannot be (such a value would make
+        // the table range swallow partitions).
         let entries_sectors = entries.len() as u64 / sector;
         let usual = gpt.alternate_lba.saturating_sub(entries_sectors);
         let backup_entries_lba = reader
             .read(gpt.alternate_lba, 1)
             .ok()
             .and_then(|backup| parse_gpt_header(&backup, gpt.alternate_lba).ok())
-            .map_or(usual, |backup| backup.entries_lba);
+            .map(|backup| backup.entries_lba)
+            .filter(|&lba| {
+                lba > gpt.last_usable_lba && lba.saturating_add(entries_sectors) <= gpt.alternate_lba
+            })
+            .unwrap_or(usual);
 
         for i in 0..gpt.entry_count as usize {
             let e = &entries[i * gpt.entry_size as usize..][..128];
@@ -562,6 +571,8 @@ impl DiskLayout {
         let target_sectors = target_size / sector;
         // Old partition table signatures at the end of the target (a stale
         // backup GPT) would confuse tools; clear what no partition uses.
+        // The restore leaves out what the image stores there, so saved
+        // gap data wins over this.
         let data_end = self
             .partitions
             .iter()
@@ -574,9 +585,8 @@ impl DiskLayout {
             .max(data_end)..target_sectors * sector;
 
         let Some(gpt) = &self.gpt else {
-            if target_size != self.disk_size {
-                plan.zero.push(tail);
-            }
+            // Also on a same-sized target: it may have been GPT before.
+            plan.zero.push(tail);
             return Ok(plan);
         };
         if target_size == self.disk_size {

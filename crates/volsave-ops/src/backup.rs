@@ -122,7 +122,12 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         "--bitlocker-raw is for disks (HD0, HD1, ...); a volume is always read decrypted"
     );
     if crate::disk::is_bitlocker(&volume) {
-        crate::disk::report_decrypted(rep, volume.display_name(), request);
+        crate::disk::report_decrypted(
+            rep,
+            volume.display_name(),
+            request,
+            crate::disk::Purpose::Image,
+        );
     }
     let use_vss = !request.no_vss && volume.supports_vss();
     if !request.no_vss && !use_vss {
@@ -161,15 +166,22 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
     let device = RawDevice::open_read(&device_path, volume.sector_size)
         .with_context(|| format!("cannot open {device_path} (run as administrator)"))?;
     let size = BlockSource::size(&device);
-    let (mut used, clusters_end) =
+    // `base` is where logical cluster numbers start (FAT keeps its tables
+    // before it); without the allocation it is unknown and no file can be
+    // left out.
+    let (mut used, clusters_end, cluster_base) =
         match used_ranges(device.file(), size, volume.cluster_size, volume.sector_size) {
-            Ok(allocation) => (allocation.used, allocation.clusters_end),
+            Ok(allocation) => (
+                allocation.used,
+                allocation.clusters_end,
+                Some(allocation.base),
+            ),
             Err(error) => {
                 warn!(
                     rep,
                     "cannot read the allocation bitmap ({error}); saving every sector"
                 );
-                (RangeSet::full(size), size)
+                (RangeSet::full(size), size, None)
             }
         };
 
@@ -200,8 +212,8 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         Some(patched) => patched,
         None => &device,
     };
-    if !request.keep_system_files {
-        let skipped = system_file_extents(&root, volume.cluster_size);
+    if !request.keep_system_files && let Some(base) = cluster_base {
+        let skipped = system_file_extents(&root, volume.cluster_size, base);
         if !skipped.is_empty() {
             note!(
                 rep,
@@ -212,8 +224,12 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         used = used.subtract(&skipped);
     }
     // File system metadata stays; only the content of the listed files is left out.
-    if request.files_not_to_backup != ExclusionMode::None && volume.supports_vss() {
-        let (excluded, entries) = excluded_files(&root, &volume, request.files_not_to_backup);
+    if request.files_not_to_backup != ExclusionMode::None
+        && volume.supports_vss()
+        && let Some(base) = cluster_base
+    {
+        let (excluded, entries) =
+            excluded_files(&root, &volume, request.files_not_to_backup, base);
         let applied = entries.iter().filter(|entry| entry.applied).count();
         // Report only what comes on top of the page/swap/hibernation files.
         let before = used.total_len();
@@ -241,7 +257,7 @@ pub fn backup(request: &BackupRequest, cancel: &AtomicBool, rep: &mut dyn Report
         rep,
     )?;
     if let Some(set) = snapshot {
-        set.complete()?;
+        crate::disk::complete_snapshot(set, rep);
     }
     Ok(())
 }
@@ -316,10 +332,20 @@ pub(crate) fn write_image(
         header.base_image_id = Some(base.image_id);
         // The full image usually sits next to its hash list.
         let full_image = hash_file.with_extension(IMAGE_EXTENSION);
-        header.metadata.base_image_name = full_image
-            .file_name()
-            .filter(|_| crate::store().exists(&full_image))
-            .map(|name| name.to_string_lossy().into_owned());
+        if crate::store().exists(&full_image) {
+            header.metadata.base_image_name = full_image
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+        } else {
+            // The hash list alone is enough to make the image, but not to
+            // restore it: say so now, not when the restore fails.
+            warn!(
+                rep,
+                "the full image {} is not next to its hash list; this differential image can \
+                 only be restored together with that full image (restore ... --base)",
+                full_image.display()
+            );
+        }
     }
 
     let writer = ImageWriter::new(request.write.create_sink(&request.image)?, header)?;
@@ -436,6 +462,12 @@ fn check_target(request: &BackupRequest) -> Result<()> {
     }
     let inputs: Vec<&Path> = inputs.iter().map(PathBuf::as_path).collect();
     crate::check_output(&request.image, request.overwrite, &inputs)?;
+    // An explicit hash list path must not silently replace the list of
+    // another full image; there is no way to make it again.
+    if let Some(hash) = &request.hash {
+        crate::check_output(hash, request.overwrite, &inputs)
+            .context("the hash list given with --hash")?;
+    }
     // The full image may have been renamed or moved away from its hash list.
     if let Some(hash_file) = &request.diff
         && crate::store().exists(&request.image)

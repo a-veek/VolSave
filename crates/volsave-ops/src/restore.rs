@@ -126,6 +126,16 @@ pub fn plan_restore(
         }
         None => opened.view,
     };
+    // Checked here, before the volume is locked and dismounted; the engine
+    // checks again before the first write.
+    if volume.size < source.size_bytes {
+        bail!(
+            "{} is too small: the image holds {} but the volume has {}",
+            volume.display_name(),
+            human(source.size_bytes),
+            human(volume.size)
+        );
+    }
     say!(
         rep,
         "Image:  {} {} ({}), {}",
@@ -229,7 +239,13 @@ pub(crate) fn verify_restored(
         rep.progress(Stage::VerifyTarget, p)
     });
     rep.stage_done(Stage::VerifyTarget);
-    let checked = result.context("verification of the restored data failed")?;
+    let checked = match result {
+        Ok(checked) => checked,
+        Err(volsave_core::RestoreError::Cancelled) => {
+            bail!("verification cancelled; the data is written but not checked")
+        }
+        Err(error) => return Err(error).context("verification of the restored data failed"),
+    };
     say!(
         rep,
         "Verified: {} read back, identical to the image",

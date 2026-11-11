@@ -36,7 +36,9 @@ impl PathRule {
     ) -> Vec<PathRule> {
         let entry = entry.trim();
         let (path, recursive) = match entry.len().checked_sub(3) {
-            Some(cut) if entry[cut..].eq_ignore_ascii_case(" /s") => {
+            // `get` rather than slicing: `cut` may fall inside a multi-byte
+            // character of a non-ASCII entry.
+            Some(cut) if entry.get(cut..).is_some_and(|s| s.eq_ignore_ascii_case(" /s")) => {
                 (entry[..cut].trim_end(), true)
             }
             _ => (entry, false),
@@ -236,5 +238,13 @@ mod tests {
         assert!(!wildcard_match("*.dmp", "memory.dmp.bak"));
         assert!(!wildcard_match("a?c", "ac"));
         assert!(!wildcard_match("pagefile.sys", "swapfile.sys"));
+    }
+
+    #[test]
+    fn non_ascii_entries_do_not_panic() {
+        // The byte cut for " /s" may fall inside a multi-byte character.
+        assert!(!parse("\\Protokolle\\\u{dc}bersicht").is_empty());
+        let _ = parse("a\u{e9}\u{e9}");
+        assert!(parse("\\Logs\\\u{dc}bersicht /s").iter().all(|r| r.recursive));
     }
 }

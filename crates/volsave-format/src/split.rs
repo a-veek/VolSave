@@ -37,9 +37,22 @@ impl SplitWriter {
             ));
         }
         let file = BufWriter::new(File::create(&base)?);
-        let mut stale = 2;
-        while fs::remove_file(part_path(&base, stale)).is_ok() {
-            stale += 1;
+        // A part that exists but cannot be deleted would be read as the
+        // continuation of the new image; that is an error, not the end.
+        for stale in 2.. {
+            match fs::remove_file(part_path(&base, stale)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "cannot delete the old part {}: {error}",
+                            part_path(&base, stale).display()
+                        ),
+                    ));
+                }
+            }
         }
         Ok(Self {
             base,
@@ -110,12 +123,25 @@ impl SplitReader {
             let len = match fs::metadata(&path) {
                 Ok(meta) => meta.len(),
                 Err(error) if part == 1 => return Err(error),
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                 Err(_) => break,
             };
             starts.push(total_len);
             parts.push(path);
             total_len += len;
             part += 1;
+        }
+        // A gap means a part is missing, not that the image ends here.
+        let after_gap = part_path(base, part + 1);
+        if after_gap.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{} is missing ({} exists)",
+                    part_path(base, part).display(),
+                    after_gap.display()
+                ),
+            ));
         }
         Ok(Self {
             parts,

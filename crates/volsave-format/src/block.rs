@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+
 use crate::util::{u32_at, u64_at};
 use crate::{Error, MAX_BLOCK_SIZE, Result};
 
@@ -94,6 +96,55 @@ pub struct EncodedBlock {
     pub payload: Vec<u8>,
 }
 
+thread_local! {
+    /// zstd contexts are expensive to set up (several MiB of workspace), so
+    /// each thread keeps one of each instead of building them per block.
+    static COMPRESSOR: RefCell<Option<(i32, zstd::bulk::Compressor<'static>)>> =
+        const { RefCell::new(None) };
+    static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        const { RefCell::new(None) };
+    /// Hash of an all-zero block of the last seen length.
+    static ZERO_HASH: Cell<Option<(usize, [u8; 32])>> = const { Cell::new(None) };
+}
+
+fn compress(data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+    COMPRESSOR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.as_mut() {
+            Some((current, compressor)) if *current == level => compressor.compress(data),
+            _ => {
+                let mut compressor = zstd::bulk::Compressor::new(level)?;
+                let compressed = compressor.compress(data)?;
+                *slot = Some((level, compressor));
+                Ok(compressed)
+            }
+        }
+    })
+}
+
+fn decompress(payload: &[u8], capacity: usize) -> std::io::Result<Vec<u8>> {
+    DECOMPRESSOR.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let decompressor = match slot.as_mut() {
+            Some(decompressor) => decompressor,
+            None => slot.insert(zstd::bulk::Decompressor::new()?),
+        };
+        decompressor.decompress(payload, capacity)
+    })
+}
+
+/// BLAKE3 of `len` zero bytes; blocks of one image share one length.
+fn zero_hash(len: usize) -> [u8; 32] {
+    ZERO_HASH.with(|cache| match cache.get() {
+        Some((cached_len, hash)) if cached_len == len => hash,
+        _ => {
+            let hash = *blake3::hash(&vec![0u8; len]).as_bytes();
+            cache.set(Some((len, hash)));
+            hash
+        }
+    })
+}
+
 /// Compresses one block of volume data located at `offset`.
 pub fn encode_block(offset: u64, data: &[u8], zstd_level: i32) -> Result<EncodedBlock> {
     let raw_len = u32::try_from(data.len())
@@ -102,15 +153,15 @@ pub fn encode_block(offset: u64, data: &[u8], zstd_level: i32) -> Result<Encoded
         .ok_or(Error::InvalidArgument(
             "block length must be 1 byte to 16 MiB",
         ))?;
-    let raw_hash = *blake3::hash(data).as_bytes();
-    let (encoding, payload) = if data.iter().all(|&byte| byte == 0) {
-        (BlockEncoding::Zero, Vec::new())
+    let (encoding, payload, raw_hash) = if data.iter().all(|&byte| byte == 0) {
+        (BlockEncoding::Zero, Vec::new(), zero_hash(data.len()))
     } else {
-        let compressed = zstd::bulk::compress(data, zstd_level)?;
+        let raw_hash = *blake3::hash(data).as_bytes();
+        let compressed = compress(data, zstd_level)?;
         if compressed.len() < data.len() {
-            (BlockEncoding::Zstd, compressed)
+            (BlockEncoding::Zstd, compressed, raw_hash)
         } else {
-            (BlockEncoding::Stored, data.to_vec())
+            (BlockEncoding::Stored, data.to_vec(), raw_hash)
         }
     };
     Ok(EncodedBlock {
@@ -126,21 +177,31 @@ pub fn encode_block(offset: u64, data: &[u8], zstd_level: i32) -> Result<Encoded
 }
 
 /// Restores the raw data of a block and checks it against its hash.
+/// `payload` has `header.stored_len` bytes.
 pub(crate) fn decode_payload(
     header: &BlockHeader,
-    payload: &[u8],
+    payload: Vec<u8>,
     file_pos: u64,
 ) -> Result<Vec<u8>> {
     let raw_len = header.raw_len as usize;
+    let mismatch = Error::BlockHashMismatch {
+        offset: header.offset,
+    };
     let data = match header.encoding {
-        BlockEncoding::Zero => vec![0u8; raw_len],
-        BlockEncoding::Stored => payload.to_vec(),
+        BlockEncoding::Zero => {
+            // The header's checksum already covers the hash; comparing it
+            // with the known zero hash avoids hashing a fresh buffer.
+            if zero_hash(raw_len) != header.raw_hash {
+                return Err(mismatch);
+            }
+            return Ok(vec![0u8; raw_len]);
+        }
+        BlockEncoding::Stored => payload,
         BlockEncoding::Zstd => {
-            let data =
-                zstd::bulk::decompress(payload, raw_len).map_err(|source| Error::Decompress {
-                    offset: header.offset,
-                    source,
-                })?;
+            let data = decompress(&payload, raw_len).map_err(|source| Error::Decompress {
+                offset: header.offset,
+                source,
+            })?;
             if data.len() != raw_len {
                 return Err(Error::BlockCorrupt {
                     file_pos,
@@ -151,9 +212,7 @@ pub(crate) fn decode_payload(
         }
     };
     if blake3::hash(&data).as_bytes() != &header.raw_hash {
-        return Err(Error::BlockHashMismatch {
-            offset: header.offset,
-        });
+        return Err(mismatch);
     }
     Ok(data)
 }

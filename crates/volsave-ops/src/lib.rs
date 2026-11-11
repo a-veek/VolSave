@@ -3,8 +3,8 @@
 //! disks.
 //!
 //! Messages and progress go to a [`Reporter`]; the caller decides how to
-//! show them. Restores are planned first ([`plan_restore`]) and run only
-//! after the caller has asked for confirmation.
+//! show them. Restores and clones are planned first ([`plan_restore`],
+//! [`plan_clone`]) and run only after the caller has asked for confirmation.
 
 #[macro_use]
 mod report;
@@ -14,6 +14,8 @@ mod util;
 
 #[cfg(windows)]
 mod backup;
+#[cfg(windows)]
+mod clone;
 #[cfg(windows)]
 mod disk;
 #[cfg(windows)]
@@ -29,6 +31,8 @@ pub use util::{VERSION, WriteOptions, human, now_unix, tool_name};
 
 #[cfg(windows)]
 pub use backup::{BackupRequest, backup};
+#[cfg(windows)]
+pub use clone::{ClonePlan, CloneRequest, plan_clone};
 #[cfg(windows)]
 pub use disk::{DiskRestore, find_disk, parse_disk, print_plan, volumes_on};
 #[cfg(windows)]

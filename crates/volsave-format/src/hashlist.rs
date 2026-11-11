@@ -9,6 +9,8 @@ pub const HASHLIST_MAGIC: [u8; 8] = *b"VSAVEHSH";
 
 const PREFIX_LEN: usize = 48;
 const HASH_LEN: usize = 32;
+/// Bytes read at a time when loading a list.
+const READ_PIECE: usize = 1 << 20;
 
 /// Truncated BLAKE3 of one chunk of volume data.
 pub type ChunkHash = [u8; 16];
@@ -125,20 +127,25 @@ impl HashList {
             return Err(Error::HashListCorrupt);
         }
 
-        // Grow with the data actually present instead of trusting `count`.
-        let raw_len = (expected as u64)
-            .checked_mul(16)
-            .ok_or(Error::HashListCorrupt)?;
-        let mut raw = Vec::new();
-        reader.by_ref().take(raw_len).read_to_end(&mut raw)?;
-        if raw.len() as u64 != raw_len {
-            return Err(Error::HashListCorrupt);
+        // Read in pieces straight into the list: the capacity grows with the
+        // data actually present instead of trusting `count`, and the bytes
+        // are not held a second time.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&prefix);
+        let mut hashes: Vec<ChunkHash> = Vec::new();
+        let mut buffer = vec![0u8; READ_PIECE];
+        let mut remaining = expected;
+        while remaining > 0 {
+            let piece = &mut buffer[..remaining.min(READ_PIECE / 16) * 16];
+            reader
+                .read_exact(piece)
+                .map_err(|_| Error::HashListCorrupt)?;
+            hasher.update(piece);
+            hashes.extend(piece.chunks_exact(16).map(array16));
+            remaining -= piece.len() / 16;
         }
         let mut stored_hash = [0u8; HASH_LEN];
         reader.read_exact(&mut stored_hash)?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&prefix);
-        hasher.update(&raw);
         if hasher.finalize().as_bytes() != &stored_hash {
             return Err(Error::HashListCorrupt);
         }
@@ -147,7 +154,7 @@ impl HashList {
             image_id,
             chunk_size,
             volume_size,
-            hashes: raw.chunks_exact(16).map(array16).collect(),
+            hashes,
         })
     }
 }

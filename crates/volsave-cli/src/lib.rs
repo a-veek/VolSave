@@ -69,6 +69,8 @@ pub struct Edition {
     /// Runs with all parsed arguments before the command, e.g. to install
     /// an image store with [`volsave_ops::set_store`].
     pub prepare: Option<fn(&clap::ArgMatches) -> Result<()>>,
+    /// Offers the `clone` command (disk to disk).
+    pub clone: bool,
 }
 
 impl Edition {
@@ -80,10 +82,16 @@ impl Edition {
         decrypted_hint: Some("VolSave Pro can save encrypted images"),
         extend: None,
         prepare: None,
+        clone: false,
     };
 }
 
 static EDITION: std::sync::OnceLock<Edition> = std::sync::OnceLock::new();
+
+/// Whether the running edition offers `clone`.
+fn clone_offered() -> bool {
+    EDITION.get().is_some_and(|edition| edition.clone)
+}
 
 #[cfg(windows)]
 fn edition() -> &'static Edition {
@@ -95,9 +103,9 @@ fn edition() -> &'static Edition {
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    /// Log file. Without it, commands working on an image log next to it
-    /// (c.dimg -> c.log); runs are appended
-    #[arg(long, global = true, value_name = "FILE", num_args = 0..=1, conflicts_with = "no_log")]
+    /// Log file, as --log=FILE. Without it, commands working on an image log
+    /// next to it (c.dimg -> c.log); runs are appended
+    #[arg(long, global = true, value_name = "FILE", num_args = 0..=1, require_equals = true, conflicts_with = "no_log")]
     log: Option<Option<PathBuf>>,
     /// Do not write a log file
     #[arg(long, global = true)]
@@ -176,6 +184,35 @@ enum Command {
         /// Read the written data back and compare it with the image
         #[arg(long)]
         verify: bool,
+    },
+    /// Copy a whole disk onto another disk (overwrites the target disk)
+    #[command(hide = true)]
+    Clone {
+        /// Disk to copy (HD0, HD1, ... as shown by `list`)
+        source: String,
+        /// Disk to overwrite; it is offline afterwards (same disk ID as the source)
+        target: String,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+        /// Do not read the target back and compare it with the source
+        #[arg(long)]
+        no_verify: bool,
+        /// Read the live volumes instead of VSS snapshots
+        #[arg(long)]
+        no_vss: bool,
+        /// Also copy pagefile.sys, swapfile.sys and hiberfil.sys
+        #[arg(long)]
+        keep_system_files: bool,
+        /// Which entries of the Windows list FilesNotToBackup to leave out
+        #[arg(long, value_enum, default_value_t = ExclusionChoice::Safe)]
+        files_not_to_backup: ExclusionChoice,
+        /// Copy every sector instead of the used blocks of each partition
+        #[arg(long)]
+        all_sectors: bool,
+        /// Copy BitLocker volumes as encrypted sectors instead of decrypted
+        #[arg(long)]
+        bitlocker_raw: bool,
     },
     /// Combine a differential image and its full image into a new full image
     Merge {
@@ -260,6 +297,18 @@ pub fn main(edition: &Edition) -> ExitCode {
         .version(edition.version)
         .about(edition.about)
         .after_help(EXAMPLES.replace("volsave ", &format!("{} ", edition.name)));
+    if edition.clone {
+        let help = command
+            .get_after_help()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        command = command
+            .mut_subcommand("clone", |clone| clone.hide(false))
+            .after_help(format!(
+                "{help}\n\n  Clone disk 0 onto the empty disk 1 (it stays offline afterwards):\n    {} clone HD0 HD1",
+                edition.name
+            ));
+    }
     if let Some(extend) = edition.extend {
         command = extend(command);
     }
@@ -305,20 +354,24 @@ fn default_log_path(command: &Command) -> Option<PathBuf> {
         | Command::Verify { image }
         | Command::Extract { image, .. } => image,
         Command::Merge { output, .. } => output,
+        Command::Clone { .. } => return Some(log_folder().join("clone.log")),
         Command::List | Command::Exclusions { .. } | Command::Info { .. } => return None,
     };
     let log = image.with_extension("log");
     // Images on remote targets log on this computer.
     match volsave_ops::store().local_path(&log) {
         Some(local) => Some(local),
-        None => {
-            let folder = std::env::var_os("ProgramData")
-                .map(|data| PathBuf::from(data).join("VolSave").join("logs"))
-                .unwrap_or_else(std::env::temp_dir);
-            let _ = std::fs::create_dir_all(&folder);
-            Some(folder.join(log.file_name()?))
-        }
+        None => Some(log_folder().join(log.file_name()?)),
     }
+}
+
+/// `%ProgramData%\VolSave\logs`, for logs without an image folder.
+fn log_folder() -> PathBuf {
+    let folder = std::env::var_os("ProgramData")
+        .map(|data| PathBuf::from(data).join("VolSave").join("logs"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&folder);
+    folder
 }
 
 fn run(command: Command) -> Result<()> {
@@ -385,11 +438,39 @@ fn run(command: Command) -> Result<()> {
             yes,
             verify,
         } => windows_cmds::restore(&image, &target, base.as_deref(), partition, yes, verify),
+        Command::Clone { .. } if !clone_offered() => {
+            anyhow::bail!("disk cloning is available in VolSave Pro")
+        }
+        #[cfg(windows)]
+        Command::Clone {
+            source,
+            target,
+            yes,
+            no_verify,
+            no_vss,
+            keep_system_files,
+            files_not_to_backup,
+            all_sectors,
+            bitlocker_raw,
+        } => windows_cmds::clone(
+            volsave_ops::CloneRequest {
+                source,
+                target,
+                verify: !no_verify,
+                no_vss,
+                keep_system_files,
+                files_not_to_backup: files_not_to_backup.into(),
+                all_sectors,
+                bitlocker_raw,
+            },
+            yes,
+        ),
         #[cfg(not(windows))]
         Command::List
         | Command::Exclusions { .. }
         | Command::Backup { .. }
-        | Command::Restore { .. } => {
+        | Command::Restore { .. }
+        | Command::Clone { .. } => {
             anyhow::bail!("this command is only available on Windows")
         }
     }

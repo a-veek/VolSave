@@ -106,7 +106,7 @@ fn log_options_choose_or_suppress_the_file() {
     let image = image.to_str().unwrap();
 
     let custom = dir.path().join("custom.txt");
-    volsave(&["verify", image, "--log", custom.to_str().unwrap()]);
+    volsave(&["verify", image, &format!("--log={}", custom.display())]);
     assert!(custom.exists());
     assert!(!dir.path().join("d.log").exists());
 
@@ -115,6 +115,10 @@ fn log_options_choose_or_suppress_the_file() {
 
     // `--log` without a file name means the default next to the image.
     volsave(&["verify", image, "--log"]);
+    assert!(dir.path().join("d.log").exists());
+    // Also in front of the command: it must not swallow the command name.
+    fs::remove_file(dir.path().join("d.log")).unwrap();
+    volsave(&["--log", "verify", image]);
     assert!(dir.path().join("d.log").exists());
 
     // `info` only reads and does not log by default.

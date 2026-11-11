@@ -1,7 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::block::{BLOCK_HEADER_LEN, BlockHeader, decode_payload};
-use crate::index::{FOOTER_LEN, IndexEntry, decode_footer, decode_index};
+use crate::index::{FOOTER_LEN, IndexEntry, decode_footer, decode_index, index_len_for};
 use crate::{Error, FileHeader, Result};
 
 /// Random access to the blocks of an image.
@@ -35,10 +35,17 @@ impl<R: Read + Seek> ImageReader<R> {
         source.seek(SeekFrom::Start(0))?;
         let (header, data_start) = FileHeader::read_from(&mut source)?;
         let len = source.seek(SeekFrom::End(0))?;
-        let (index, index_rebuilt) = match read_index(&mut source, data_start, len) {
-            Ok(index) => (index, false),
-            Err(_) => (scan_blocks(&mut source, data_start, len)?, true),
-        };
+        let (index, index_rebuilt) =
+            match read_index(&mut source, data_start, len, header.block_size) {
+                Ok(index) => (index, false),
+                // Only a missing or damaged index is rebuilt; a read error
+                // is reported as such, not as an incomplete image.
+                Err(Error::IndexCorrupt) => (scan_blocks(&mut source, data_start, len)?, true),
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    (scan_blocks(&mut source, data_start, len)?, true)
+                }
+                Err(error) => return Err(error),
+            };
         Ok(Self {
             source,
             header,
@@ -91,7 +98,7 @@ impl<R: Read + Seek> ImageReader<R> {
         }
         let mut payload = vec![0u8; header.stored_len as usize];
         self.source.read_exact(&mut payload)?;
-        decode_payload(&header, &payload, entry.file_pos)
+        decode_payload(&header, payload, entry.file_pos)
     }
 
     /// Reads every block and checks its checksum. `progress` gets
@@ -122,6 +129,7 @@ fn read_index<R: Read + Seek>(
     source: &mut R,
     data_start: u64,
     len: u64,
+    block_size: u32,
 ) -> Result<Vec<IndexEntry>> {
     let footer_pos = len
         .checked_sub(FOOTER_LEN)
@@ -134,16 +142,26 @@ fn read_index<R: Read + Seek>(
     if index_pos < data_start || index_pos.checked_add(index_len) != Some(footer_pos) {
         return Err(Error::IndexCorrupt);
     }
+    // The footer is only checksummed, not authenticated: before trusting
+    // its length for an allocation, the entry count must fit the data
+    // area (every indexed block has at least a header in it).
+    let max_entries = (index_pos - data_start) / BLOCK_HEADER_LEN as u64;
+    if index_len > index_len_for(max_entries).unwrap_or(u64::MAX) {
+        return Err(Error::IndexCorrupt);
+    }
 
     source.seek(SeekFrom::Start(index_pos))?;
     let mut raw = vec![0u8; usize::try_from(index_len).map_err(|_| Error::IndexCorrupt)?];
     source.read_exact(&mut raw)?;
     let index = decode_index(&raw)?;
-    let positions_ok = index
-        .iter()
-        .all(|entry| entry.file_pos >= data_start && entry.file_pos < index_pos);
-    if !positions_ok {
-        return Err(Error::IndexCorrupt);
+    let mut last_pos = None;
+    for entry in &index {
+        let in_data = entry.file_pos >= data_start && entry.file_pos < index_pos;
+        let ascending = last_pos.is_none_or(|last| entry.file_pos > last);
+        if !in_data || !ascending || entry.raw_len > block_size {
+            return Err(Error::IndexCorrupt);
+        }
+        last_pos = Some(entry.file_pos);
     }
     Ok(index)
 }
@@ -166,6 +184,9 @@ fn scan_blocks<R: Read + Seek>(
             break;
         };
         let next = pos + BLOCK_HEADER_LEN as u64 + u64::from(header.stored_len);
+        let Some(end) = header.offset.checked_add(u64::from(header.raw_len)) else {
+            break;
+        };
         if next > len || header.offset < min_offset {
             break;
         }
@@ -174,7 +195,7 @@ fn scan_blocks<R: Read + Seek>(
             raw_len: header.raw_len,
             file_pos: pos,
         });
-        min_offset = header.offset + u64::from(header.raw_len);
+        min_offset = end;
         pos = next;
     }
     Ok(index)

@@ -10,7 +10,9 @@ use windows::Win32::System::Ioctl::{
     STORAGE_DEVICE_DESCRIPTOR,
 };
 
-use crate::util::{Access, format_guid, from_wide, ioctl, open, read_struct};
+use windows::core::GUID;
+
+use crate::util::{Access, format_guid, from_wide, ioctl, open, read_struct, u32_at};
 
 /// Highest `\\.\PhysicalDriveN` number probed.
 const MAX_DISKS: u32 = 64;
@@ -136,8 +138,19 @@ fn describe(device: &std::fs::File) -> io::Result<(String, bool)> {
     // STORAGE_PROPERTY_QUERY { StorageDeviceProperty = 0, PropertyStandardQuery = 0 }
     let query = [0u8; 12];
     let raw = ioctl(device, IOCTL_STORAGE_QUERY_PROPERTY, &query, 1024)?;
-    // SAFETY: STORAGE_DEVICE_DESCRIPTOR consists of integers only.
-    let descriptor: STORAGE_DEVICE_DESCRIPTOR = unsafe { read_struct(&raw, 0)? };
+    // STORAGE_DEVICE_DESCRIPTOR holds BOOLEAN fields; a driver may put any
+    // byte there, which a Rust `bool` must not hold, so the fields are read
+    // at their offsets instead of as the struct.
+    const REMOVABLE_MEDIA: usize = 10;
+    const VENDOR_ID_OFFSET: usize = 12;
+    const PRODUCT_ID_OFFSET: usize = 16;
+    if raw.len() < size_of::<STORAGE_DEVICE_DESCRIPTOR>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IOCTL result too short",
+        ));
+    }
+    let removable = raw[REMOVABLE_MEDIA] != 0;
     let text = |offset: u32| -> String {
         let start = offset as usize;
         if offset == 0 || start >= raw.len() {
@@ -150,15 +163,45 @@ fn describe(device: &std::fs::File) -> io::Result<(String, bool)> {
         String::from_utf8_lossy(&raw[start..end]).trim().to_string()
     };
     let model = [
-        text(descriptor.VendorIdOffset),
-        text(descriptor.ProductIdOffset),
+        text(u32_at(&raw, VENDOR_ID_OFFSET)?),
+        text(u32_at(&raw, PRODUCT_ID_OFFSET)?),
     ]
     .into_iter()
     .filter(|part| !part.is_empty())
     .collect::<Vec<_>>()
     .join(" ");
-    Ok((model, descriptor.RemovableMedia))
+    Ok((model, removable))
 }
+
+/// `PARTITION_INFORMATION_EX` with its BOOLEAN fields as bytes, so that it
+/// is valid for any bit pattern a driver returns. The union at the end is
+/// kept as raw bytes and picked apart by partition style.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartitionEntry {
+    style: i32,
+    _pad: u32,
+    starting_offset: i64,
+    partition_length: i64,
+    partition_number: u32,
+    _rewrite: u8,
+    _is_service: u8,
+    _pad2: [u8; 2],
+    body: [u8; 112],
+}
+
+const _: () = {
+    assert!(size_of::<PartitionEntry>() == size_of::<PARTITION_INFORMATION_EX>());
+    assert!(
+        offset_of!(PartitionEntry, starting_offset)
+            == offset_of!(PARTITION_INFORMATION_EX, StartingOffset)
+    );
+    assert!(
+        offset_of!(PartitionEntry, partition_number)
+            == offset_of!(PARTITION_INFORMATION_EX, PartitionNumber)
+    );
+    assert!(offset_of!(PartitionEntry, body) == offset_of!(PARTITION_INFORMATION_EX, Anonymous));
+};
 
 fn read_layout(device: &std::fs::File) -> io::Result<DiskLayout> {
     let raw = ioctl(
@@ -172,32 +215,38 @@ fn read_layout(device: &std::fs::File) -> io::Result<DiskLayout> {
     let first = offset_of!(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry);
     let mut partitions = Vec::new();
     for i in 0..header.PartitionCount as usize {
-        // SAFETY: as above; `read_struct` checks the bounds.
-        let entry: PARTITION_INFORMATION_EX =
-            unsafe { read_struct(&raw, first + i * size_of::<PARTITION_INFORMATION_EX>())? };
-        if entry.PartitionNumber == 0 || entry.PartitionLength == 0 {
+        // SAFETY: `PartitionEntry` consists of integers and byte arrays;
+        // `read_struct` checks the bounds.
+        let entry: PartitionEntry =
+            unsafe { read_struct(&raw, first + i * size_of::<PartitionEntry>())? };
+        if entry.partition_number == 0 || entry.partition_length == 0 {
             continue; // unused MBR slot or extended container
         }
-        let kind = if entry.PartitionStyle == PARTITION_STYLE_GPT {
-            // SAFETY: the style says which union member is valid.
-            let gpt = unsafe { entry.Anonymous.Gpt };
+        let kind = if entry.style == PARTITION_STYLE_GPT.0 {
+            // PARTITION_INFORMATION_GPT: PartitionType, PartitionId, Attributes, Name[36].
+            // SAFETY: a GUID is four integers, valid for any bytes; in bounds.
+            let type_id: GUID = unsafe { read_struct(&entry.body, 0)? };
+            let partition_id: GUID = unsafe { read_struct(&entry.body, 16)? };
+            let name: Vec<u16> = entry.body[40..112]
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
             PartitionKind::Gpt {
-                type_id: format_guid(&gpt.PartitionType),
-                partition_id: format_guid(&gpt.PartitionId),
-                name: from_wide(&gpt.Name),
+                type_id: format_guid(&type_id),
+                partition_id: format_guid(&partition_id),
+                name: from_wide(&name),
             }
         } else {
-            // SAFETY: as above.
-            let mbr = unsafe { entry.Anonymous.Mbr };
+            // PARTITION_INFORMATION_MBR: PartitionType, BootIndicator, ...
             PartitionKind::Mbr {
-                partition_type: mbr.PartitionType,
-                bootable: mbr.BootIndicator,
+                partition_type: entry.body[0],
+                bootable: entry.body[1] != 0,
             }
         };
         partitions.push(PartitionInfo {
-            number: entry.PartitionNumber,
-            offset: entry.StartingOffset as u64,
-            length: entry.PartitionLength as u64,
+            number: entry.partition_number,
+            offset: entry.starting_offset as u64,
+            length: entry.partition_length as u64,
             kind,
         });
     }

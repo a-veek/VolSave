@@ -23,6 +23,10 @@ pub struct Allocation {
     /// backup boot sector there) is part of `used`, but VSS snapshots may
     /// not expose it.
     pub clusters_end: u64,
+    /// Byte offset of cluster 0 (logical cluster numbers count from here):
+    /// 0 on NTFS/ReFS, the reserved sectors and tables on FAT/exFAT. File
+    /// extents are relative to it.
+    pub base: u64,
 }
 
 /// Byte ranges of `volume` that hold data, according to its file system.
@@ -56,13 +60,27 @@ pub fn used_ranges(
             &mut output,
         )?;
         // VOLUME_BITMAP_BUFFER: StartingLcn, BitmapSize (in clusters), bitmap bytes.
+        if returned < 16 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FSCTL_GET_VOLUME_BITMAP returned no header",
+            ));
+        }
         let start_lcn = i64_at(&output, 0)? as u64;
         total_clusters = start_lcn + i64_at(&output, 8)? as u64;
-        let bitmap = &output[16..returned.max(16)];
+        let bitmap = &output[16..returned];
         let clusters = (bitmap.len() as u64 * 8).min(total_clusters - start_lcn);
         push_runs(&mut used, bitmap, clusters, start_lcn, base, cluster_size);
         if !more {
             break;
+        }
+        // A driver that asks for another call without delivering anything
+        // would make this loop spin forever.
+        if clusters == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FSCTL_GET_VOLUME_BITMAP made no progress",
+            ));
         }
         next_lcn = (start_lcn + clusters) as i64;
     }
@@ -72,6 +90,7 @@ pub fn used_ranges(
     Ok(Allocation {
         used: used.clamp(0..volume_size),
         clusters_end,
+        base,
     })
 }
 
@@ -143,10 +162,11 @@ pub fn file_extents(path: &str, cluster_size: u32, base: u64) -> io::Result<Rang
 }
 
 /// Extents of the page, swap and hibernation files under `root` (a path
-/// ending in `\`). Missing files are skipped.
-pub fn system_file_extents(root: &str, cluster_size: u32) -> RangeSet {
+/// ending in `\`). Missing files are skipped. `base` is
+/// [`Allocation::base`] of the volume.
+pub fn system_file_extents(root: &str, cluster_size: u32, base: u64) -> RangeSet {
     SYSTEM_FILES
         .iter()
-        .filter_map(|name| file_extents(&format!("{root}{name}"), cluster_size, 0).ok())
+        .filter_map(|name| file_extents(&format!("{root}{name}"), cluster_size, base).ok())
         .fold(RangeSet::new(), |all, extents| all.union(&extents))
 }

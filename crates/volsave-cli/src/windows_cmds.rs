@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use volsave_ops::{BackupRequest, ExclusionMode, plan_restore};
+use volsave_ops::{BackupRequest, CloneRequest, ExclusionMode, plan_clone, plan_restore};
 use volsave_win::{
     DiskLayout, VolumeInfo, enable_backup_privileges, excluded_files, list_disks, list_volumes,
     resolve_volume,
@@ -106,6 +106,20 @@ pub(crate) fn restore(
     plan.run(verify, &CANCEL, &mut console)
 }
 
+pub(crate) fn clone(request: CloneRequest, yes: bool) -> Result<()> {
+    let mut console = Console::default();
+    let plan = plan_clone(&request, &mut console)?;
+    if !yes
+        && !confirm(&format!(
+            "All data on {} will be overwritten. Type YES to continue: ",
+            plan.target_name()
+        ))?
+    {
+        bail!("clone cancelled");
+    }
+    plan.run(&CANCEL, &mut console)
+}
+
 fn confirm(question: &str) -> Result<bool> {
     eprint!("{question}");
     std::io::stderr().flush()?;
@@ -141,7 +155,8 @@ pub(crate) fn exclusions(target: &str) -> Result<()> {
         );
         return Ok(());
     }
-    let (skipped, entries) = excluded_files(&volume.guid_path, &volume, ExclusionMode::Safe);
+    // NTFS and ReFS count clusters from the volume start (base 0).
+    let (skipped, entries) = excluded_files(&volume.guid_path, &volume, ExclusionMode::Safe, 0);
     if entries.is_empty() {
         println!(
             "Nothing on {} matches FilesNotToBackup",

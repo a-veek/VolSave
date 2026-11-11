@@ -3,6 +3,43 @@
 All notable changes to VolSave. Downloads: [Releases](../../releases).
 *Deutsch: [unten](#deutsch) · Español: [abajo](#español).*
 
+## 0.2.8 – 2026-11-11
+- For other front-ends: copying a whole disk onto another disk without an
+  image in between (`plan_clone`, `ClonePlan::run`): read like a disk backup
+  (VSS snapshots, used blocks), written and verified like a disk restore;
+  the target is taken offline because it gets the same disk ID. The command
+  `clone` is only offered by editions that enable it.
+- The restore of a disk image shares its code with the clone; no change in
+  behaviour.
+- Fixed: on FAT and exFAT volumes the page, swap and hibernation files and
+  the FilesNotToBackup entries were left out at the wrong place (shifted by
+  the file system tables), so other data could be missing from the image.
+  Images made with --keep-system-files --files-not-to-backup none were not
+  affected; NTFS and ReFS were never affected.
+- Before a disk restore or clone writes, it checks that the target is still
+  the disk that was shown for confirmation (size, sector size, model); a
+  disk plugged in since may have taken its number.
+- Damaged or crafted image files cannot make the reader allocate huge
+  amounts of memory or miscount blocks; a read error while opening an image
+  is reported as such instead of "index rebuilt"; a missing middle part of
+  a split image is named instead of silently shortening the image.
+- A differential backup whose full image is not next to its hash list
+  gets a warning: it can only be restored together with that full image.
+- --hash never replaces an existing hash list without --overwrite.
+- A volume restore refuses a too small target before locking it, and
+  Ctrl+C during the final verification says that the data is complete but
+  unchecked instead of asking to restore again.
+- A VSS writer complaining after the backup is complete gives a warning,
+  not a failure.
+- --log takes its file as --log=FILE, so `volsave --log backup ...` no
+  longer eats the command name.
+- volsave.exe carries a Windows manifest and version information
+  (product, version, description); without them Windows Defender treated
+  the bare file as suspicious and removed it.
+- Faster: zstd keeps one context per thread instead of making one per
+  block; restore and verify reuse their buffers; cloning a fragmented
+  volume no longer slows down with the number of fragments.
+
 ## 0.2.7 – 2026-11-09
 - For other front-ends: a storage that encrypts its images (`ImageStore::encrypts`)
   gets a fitting warning for a BitLocker volume saved decrypted (only the
@@ -62,6 +99,48 @@ All notable changes to VolSave. Downloads: [Releases](../../releases).
 ## Deutsch
 
 Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases).
+
+### 0.2.8 – 11.11.2026
+- Für andere Oberflächen: einen ganzen Datenträger ohne Image direkt auf
+  einen anderen kopieren (`plan_clone`, `ClonePlan::run`): gelesen wie eine
+  Disk-Sicherung (VSS-Snapshots, belegte Blöcke), geschrieben und geprüft
+  wie ein Disk-Restore; das Ziel wird offline genommen, weil es dieselbe
+  Platten-ID bekommt. Den Befehl `clone` bieten nur Editionen an, die ihn
+  freischalten.
+- Der Restore eines Disk-Images teilt seinen Code mit dem Klonen; keine
+  Verhaltensänderung.
+- Behoben: Auf FAT- und exFAT-Volumes wurden Auslagerungs-, Swap- und
+  Ruhezustandsdatei sowie die FilesNotToBackup-Einträge an der falschen
+  Stelle ausgelassen (um die Dateisystemtabellen verschoben), sodass andere
+  Daten im Image fehlen konnten. Images mit --keep-system-files
+  --files-not-to-backup none waren nicht betroffen; NTFS und ReFS nie.
+- Vor dem Schreiben prüfen Disk-Restore und Klonen, dass das Ziel noch die
+  Platte ist, die zur Bestätigung gezeigt wurde (Größe, Sektorgröße,
+  Modell); eine inzwischen angesteckte Platte kann ihre Nummer übernommen
+  haben.
+- Beschädigte oder manipulierte Image-Dateien können den Leser nicht zu
+  riesigen Speicheranforderungen oder falschen Blockzahlen bringen; ein
+  Lesefehler beim Öffnen wird als solcher gemeldet statt als „Index neu
+  aufgebaut“; ein fehlender mittlerer Teil eines aufgeteilten Images wird
+  benannt statt das Image stillschweigend zu verkürzen.
+- Eine Differenz-Sicherung, deren Voll-Image nicht neben seiner Hashliste
+  liegt, bekommt eine Warnung: Sie lässt sich nur zusammen mit diesem
+  Voll-Image wiederherstellen.
+- --hash ersetzt eine vorhandene Hashliste nie ohne --overwrite.
+- Ein Volume-Restore lehnt ein zu kleines Ziel ab, bevor es gesperrt wird,
+  und Strg+C während der abschließenden Prüfung meldet, dass die Daten
+  vollständig, aber ungeprüft sind, statt zum erneuten Restore zu raten.
+- Ein VSS-Writer, der sich nach abgeschlossener Sicherung beschwert, ergibt
+  eine Warnung, keinen Fehlschlag.
+- --log nimmt seine Datei als --log=DATEI, damit `volsave --log backup ...`
+  nicht mehr den Befehlsnamen schluckt.
+- volsave.exe trägt ein Windows-Manifest und Versionsinformationen
+  (Produkt, Version, Beschreibung); ohne sie hielt der Windows Defender die
+  nackte Datei für verdächtig und entfernte sie.
+- Schneller: zstd behält einen Kontext pro Thread statt einen pro Block;
+  Restore und Prüfung verwenden ihre Puffer wieder; das Klonen eines
+  fragmentierten Volumes wird nicht mehr mit der Zahl der Fragmente
+  langsamer.
 
 ### 0.2.7 – 09.11.2026
 - Für andere Oberflächen: Verschlüsselt der Speicher seine Images
@@ -129,6 +208,48 @@ Alle wichtigen Änderungen an VolSave. Downloads unter [Releases](../../releases
 ## Español
 
 Todos los cambios importantes de VolSave. Descargas en [Releases](../../releases).
+
+### 0.2.8 – 11/11/2026
+- Para otras interfaces: copiar un disco completo directamente a otro, sin
+  imagen intermedia (`plan_clone`, `ClonePlan::run`): se lee como una copia
+  de disco (instantáneas VSS, bloques usados) y se escribe y verifica como
+  una restauración de disco; el destino se pone fuera de línea porque recibe
+  el mismo ID de disco. El comando `clone` solo lo ofrecen las ediciones que
+  lo activan.
+- La restauración de una imagen de disco comparte su código con la
+  clonación; sin cambios de comportamiento.
+- Corregido: en volúmenes FAT y exFAT, los archivos de paginación,
+  intercambio e hibernación y las entradas de FilesNotToBackup se omitían
+  en el lugar equivocado (desplazados por las tablas del sistema de
+  archivos), por lo que podían faltar otros datos en la imagen. Las
+  imágenes hechas con --keep-system-files --files-not-to-backup none no se
+  vieron afectadas; NTFS y ReFS nunca.
+- Antes de escribir, la restauración de disco y la clonación comprueban que
+  el destino sigue siendo el disco mostrado para confirmar (tamaño, tamaño
+  de sector, modelo); un disco conectado después puede haber tomado su
+  número.
+- Los archivos de imagen dañados o manipulados no pueden hacer que el
+  lector reserve enormes cantidades de memoria ni cuente mal los bloques;
+  un error de lectura al abrir se indica como tal en lugar de «índice
+  reconstruido»; una parte intermedia ausente de una imagen dividida se
+  nombra en lugar de acortar la imagen en silencio.
+- Una copia diferencial cuya imagen completa no está junto a su lista de
+  hashes recibe una advertencia: solo se puede restaurar junto con esa
+  imagen completa.
+- --hash nunca sustituye una lista de hashes existente sin --overwrite.
+- Una restauración de volumen rechaza un destino demasiado pequeño antes de
+  bloquearlo, y Ctrl+C durante la verificación final indica que los datos
+  están completos pero sin comprobar, en lugar de pedir restaurar de nuevo.
+- Un escritor VSS que se queja tras completar la copia produce una
+  advertencia, no un fallo.
+- --log toma su archivo como --log=ARCHIVO, para que `volsave --log backup
+  ...` ya no se trague el nombre del comando.
+- volsave.exe lleva un manifiesto de Windows e información de versión
+  (producto, versión, descripción); sin ellos Windows Defender consideraba
+  sospechoso el archivo desnudo y lo eliminaba.
+- Más rápido: zstd mantiene un contexto por hilo en lugar de uno por
+  bloque; restaurar y verificar reutilizan sus búferes; clonar un volumen
+  fragmentado ya no se ralentiza con el número de fragmentos.
 
 ### 0.2.7 – 09/11/2026
 - Para otras interfaces: si el almacén cifra sus imágenes

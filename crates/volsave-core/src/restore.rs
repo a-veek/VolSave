@@ -96,19 +96,22 @@ pub fn restore_disk(
     let head = RangeSet::from_ranges([layout.head_range()]);
     let body = regions.subtract(&head);
     let head = regions.clamp(layout.head_range());
+    // Stale signatures are cleared only where the image stores nothing.
+    let zero = RangeSet::from_ranges(plan.zero.iter().cloned()).subtract(&regions);
     let extra: u64 = plan.writes.iter().map(|(_, d)| d.len() as u64).sum::<u64>()
-        + plan.zero.iter().map(|r| r.end - r.start).sum::<u64>();
+        + zero.total_len();
 
     let mut report = Progress {
         bytes_total: regions.total_len() + extra,
         ..Progress::default()
     };
     copy_regions(image, target, &body, cancel, &mut report, &mut progress)?;
-    for range in &plan.zero {
+    let zeros = AlignedBuf::zeroed(RESTORE_CHUNK as usize);
+    for range in zero.ranges() {
         let mut pos = range.start;
         while pos < range.end {
             let len = (range.end - pos).min(u64::from(RESTORE_CHUNK));
-            write(target, pos, &AlignedBuf::zeroed(len as usize))?;
+            write(target, pos, &zeros[..len as usize])?;
             pos += len;
             report.add(len);
             progress(&report);
@@ -125,12 +128,9 @@ pub fn restore_disk(
     }
     flush(target)?;
 
-    let overwritten = RangeSet::from_ranges(
-        plan.zero
-            .iter()
-            .cloned()
-            .chain(plan.writes.iter().map(|(o, d)| *o..*o + d.len() as u64)),
-    );
+    let overwritten = zero.union(&RangeSet::from_ranges(
+        plan.writes.iter().map(|(o, d)| *o..*o + d.len() as u64),
+    ));
     let patched = RangeSet::from_ranges(plan.patches.iter().map(|(o, d)| *o..*o + d.len() as u64));
     Ok(RestoreStats {
         bytes_written: report.bytes_written,
@@ -151,17 +151,20 @@ pub fn verify_target(
         bytes_total: ranges.total_len(),
         ..Progress::default()
     };
+    // One pair of buffers for the whole run; parts are at most a chunk.
+    let mut expected = vec![0u8; RESTORE_CHUNK as usize];
+    let mut found = AlignedBuf::zeroed(RESTORE_CHUNK as usize);
     for block in ranges.plan(RESTORE_CHUNK) {
         for part in &block.parts {
             if cancel.load(Ordering::Relaxed) {
                 return Err(RestoreError::Cancelled);
             }
             let len = (part.end - part.start) as usize;
-            let mut expected = vec![0; len];
-            image.read_at(part.start, &mut expected)?;
-            let mut found = AlignedBuf::zeroed(len);
+            let expected = &mut expected[..len];
+            let found = &mut found[..len];
+            image.read_at(part.start, expected)?;
             target
-                .read_at(part.start, &mut found)
+                .read_at(part.start, found)
                 .map_err(|source| RestoreError::Read {
                     offset: part.start,
                     source,
@@ -186,15 +189,17 @@ fn copy_regions(
     report: &mut Progress,
     progress: &mut impl FnMut(&Progress),
 ) -> Result<(), RestoreError> {
+    // Aligned, because devices are written unbuffered; one buffer for all
+    // parts, which are at most a chunk.
+    let mut data = AlignedBuf::zeroed(RESTORE_CHUNK as usize);
     for block in regions.plan(RESTORE_CHUNK) {
         for part in &block.parts {
             if cancel.load(Ordering::Relaxed) {
                 return Err(RestoreError::Cancelled);
             }
-            // Aligned, because devices are written unbuffered.
-            let mut data = AlignedBuf::zeroed((part.end - part.start) as usize);
-            image.read_at(part.start, &mut data)?;
-            write(target, part.start, &data)?;
+            let data = &mut data[..(part.end - part.start) as usize];
+            image.read_at(part.start, data)?;
+            write(target, part.start, data)?;
             report.add(data.len() as u64);
             progress(report);
         }

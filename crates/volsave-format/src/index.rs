@@ -20,9 +20,18 @@ pub struct IndexEntry {
 }
 
 impl IndexEntry {
+    /// End of the block's data within the source. Decoding rejects
+    /// overflowing entries, so this saturates only for hand-made ones.
     pub fn end(&self) -> u64 {
-        self.offset + u64::from(self.raw_len)
+        self.offset.saturating_add(u64::from(self.raw_len))
     }
+}
+
+/// Encoded size of an index with `entries` entries, `None` on overflow.
+pub(crate) fn index_len_for(entries: u64) -> Option<u64> {
+    entries
+        .checked_mul(ENTRY_LEN as u64)?
+        .checked_add((INDEX_PREFIX_LEN + CRC_LEN) as u64)
 }
 
 pub(crate) fn encode_index(entries: &[IndexEntry]) -> Vec<u8> {

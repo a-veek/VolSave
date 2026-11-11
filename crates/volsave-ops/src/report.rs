@@ -21,6 +21,8 @@ pub enum Stage {
     /// Reading restored data back from the target.
     VerifyTarget,
     Merge,
+    /// Copying a disk onto another one.
+    Clone,
 }
 
 impl Stage {
@@ -30,6 +32,7 @@ impl Stage {
             Stage::Restore => "Restore",
             Stage::VerifyTarget => "Verifying target",
             Stage::Merge => "Merging",
+            Stage::Clone => "Cloning",
         }
     }
 }

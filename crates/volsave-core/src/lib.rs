@@ -7,6 +7,7 @@
 
 mod backup;
 mod bootsector;
+mod clone;
 mod buffer;
 mod exclusion;
 mod partition;
@@ -20,6 +21,7 @@ pub use bootsector::{
     BootSectorKind, HiddenSectorsFix, fix_ntfs_hidden_sectors, identify_boot_sector,
 };
 pub use buffer::AlignedBuf;
+pub use clone::SourceView;
 pub use exclusion::{PathRule, wildcard_match};
 pub use partition::{
     DiskLayout, Gpt, Guid, LayoutError, Partition, PartitionKind, PartitionStyle, Retarget,

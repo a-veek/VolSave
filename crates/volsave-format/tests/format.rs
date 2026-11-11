@@ -344,3 +344,77 @@ fn image_on_disk_survives_reopen() {
     assert_eq!(reader.blocks().len(), 1);
     assert!(reader.verify(|_, _| {}).is_ok());
 }
+
+/// A block header as the scanner sees it: tag, flags, offset, raw length,
+/// stored length, hash, CRC.
+fn raw_block_header(offset: u64, raw_len: u32, flags: u32) -> [u8; 60] {
+    let mut buf = [0u8; 60];
+    buf[0..4].copy_from_slice(b"BLK1");
+    buf[4..8].copy_from_slice(&flags.to_le_bytes());
+    buf[8..16].copy_from_slice(&offset.to_le_bytes());
+    buf[16..20].copy_from_slice(&raw_len.to_le_bytes());
+    buf[20..24].copy_from_slice(&0u32.to_le_bytes());
+    let crc = crc32fast::hash(&buf[..56]);
+    buf[56..60].copy_from_slice(&crc.to_le_bytes());
+    buf
+}
+
+#[test]
+fn scan_stops_at_a_block_whose_end_overflows() {
+    let blocks = sample_blocks();
+    let mut image = write_image(&blocks);
+    let last_block_end = {
+        let mut reader = ImageReader::open(Cursor::new(image.clone())).unwrap();
+        let last = *reader.blocks().last().unwrap();
+        reader.read_block(&last).unwrap();
+        reader.into_inner().position()
+    };
+    image.truncate(last_block_end as usize);
+    // A zero block near the end of the address space: offset + length wraps.
+    image.extend_from_slice(&raw_block_header(u64::MAX - 1, 4096, 2));
+
+    let reader = ImageReader::open(Cursor::new(image)).unwrap();
+    assert!(reader.index_rebuilt());
+    assert_eq!(reader.blocks().len(), blocks.len());
+    assert!(reader.blocks().iter().all(|b| b.end() > b.offset));
+}
+
+#[test]
+fn an_index_length_the_data_cannot_hold_is_rejected_before_allocating() {
+    let image = write_image(&sample_blocks());
+    let data_start = {
+        let reader = ImageReader::open(Cursor::new(image.clone())).unwrap();
+        reader.blocks()[0].file_pos
+    };
+    // Footer claims the index spans the whole data area.
+    let footer_pos = image.len() as u64 - 32;
+    let mut forged = image[..footer_pos as usize].to_vec();
+    let mut footer = [0u8; 32];
+    footer[0..8].copy_from_slice(b"VSAVEEND");
+    footer[8..16].copy_from_slice(&data_start.to_le_bytes());
+    footer[16..24].copy_from_slice(&(footer_pos - data_start).to_le_bytes());
+    let crc = crc32fast::hash(&footer[..24]);
+    footer[24..28].copy_from_slice(&crc.to_le_bytes());
+    forged.extend_from_slice(&footer);
+
+    // Falls back to the scan instead of trusting the length.
+    let reader = ImageReader::open(Cursor::new(forged)).unwrap();
+    assert!(reader.index_rebuilt());
+    assert_eq!(reader.blocks().len(), sample_blocks().len());
+}
+
+#[test]
+fn a_missing_middle_part_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("gap.dimg");
+    let mut writer = SplitWriter::create(&base, Some(1000)).unwrap();
+    writer.write_all(&noise(3500, 3)).unwrap();
+    assert_eq!(writer.finish().unwrap(), 4);
+    fs::remove_file(part_path(&base, 2)).unwrap();
+
+    let Err(error) = SplitReader::open(&base) else {
+        panic!("a missing part was not noticed");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(error.to_string().contains(".002"), "{error}");
+}

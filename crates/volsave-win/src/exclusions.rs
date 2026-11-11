@@ -136,11 +136,13 @@ pub fn files_not_to_backup() -> Vec<(String, String)> {
 
 /// Byte ranges of the files under `root` (the volume root or a snapshot of
 /// it, ending in `\`) that `FilesNotToBackup` excludes in `mode`, with a
-/// report on every entry that matches files, applied or not.
+/// report on every entry that matches files, applied or not. `base` is the
+/// byte offset of cluster 0 (`Allocation::base`; 0 on NTFS and ReFS).
 pub fn excluded_files(
     root: &str,
     volume: &VolumeInfo,
     mode: ExclusionMode,
+    base: u64,
 ) -> (RangeSet, Vec<ExcludedEntry>) {
     let profiles = user_profiles();
     let mut all = Vec::new();
@@ -152,7 +154,11 @@ pub fn excluded_files(
         let mut found = Found::default();
         for rule in &rules {
             let folder = format!("{root}{}", rule.dir);
-            collect(Path::new(&folder), rule, volume.cluster_size, 0, &mut found);
+            let extents = Extents {
+                cluster_size: volume.cluster_size,
+                base,
+            };
+            collect(Path::new(&folder), rule, extents, 0, &mut found);
         }
         if found.files > 0 {
             let ranges = RangeSet::from_ranges(found.ranges);
@@ -178,9 +184,16 @@ struct Found {
     files: usize,
 }
 
+/// How file extents of the volume translate to byte ranges.
+#[derive(Clone, Copy)]
+struct Extents {
+    cluster_size: u32,
+    base: u64,
+}
+
 /// Collects the files in `folder` matching `rule`. Links and junctions are
 /// not followed; unreadable folders and files are skipped.
-fn collect(folder: &Path, rule: &PathRule, cluster_size: u32, depth: usize, found: &mut Found) {
+fn collect(folder: &Path, rule: &PathRule, extents: Extents, depth: usize, found: &mut Found) {
     let Ok(entries) = fs::read_dir(folder) else {
         return;
     };
@@ -201,15 +214,16 @@ fn collect(folder: &Path, rule: &PathRule, cluster_size: u32, depth: usize, foun
                     pattern: "*".into(),
                     recursive: true,
                 };
-                collect(&path, &everything, cluster_size, depth + 1, found);
+                collect(&path, &everything, extents, depth + 1, found);
             } else if rule.recursive && depth < MAX_DEPTH {
-                collect(&path, rule, cluster_size, depth + 1, found);
+                collect(&path, rule, extents, depth + 1, found);
             }
         } else if rule.matches(&name)
-            && let Ok(extents) = file_extents(&path.to_string_lossy(), cluster_size, 0)
+            && let Ok(ranges) =
+                file_extents(&path.to_string_lossy(), extents.cluster_size, extents.base)
         {
             found.files += 1;
-            found.ranges.extend(extents.ranges().iter().cloned());
+            found.ranges.extend(ranges.ranges().iter().cloned());
         }
     }
 }

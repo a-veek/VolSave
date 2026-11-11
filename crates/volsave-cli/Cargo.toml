@@ -28,3 +28,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
